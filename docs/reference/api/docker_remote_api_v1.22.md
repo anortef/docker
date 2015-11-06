@@ -117,6 +117,7 @@ Query Parameters:
   -   `exited=<int>`; -- containers with exit code of  `<int>` ;
   -   `status=`(`created`|`restarting`|`running`|`paused`|`exited`)
   -   `label=key` or `label="key=value"` of a container label
+  -   `isolation=`(`default`|`hyperv`)   (Windows daemon only)
 
 Status Codes:
 
@@ -145,7 +146,10 @@ Create a container
            "Tty": false,
            "OpenStdin": false,
            "StdinOnce": false,
-           "Env": null,
+           "Env": [
+                   "FOO=bar",
+                   "BAZ=quux"
+           ],
            "Cmd": [
                    "date"
            ],
@@ -174,7 +178,6 @@ Create a container
            "HostConfig": {
              "Binds": ["/tmp:/tmp"],
              "Links": ["redis3:redis"],
-             "LxcConf": {"lxc.utsname":"docker"},
              "Memory": 0,
              "MemorySwap": 0,
              "MemoryReservation": 0,
@@ -247,7 +250,7 @@ Json Parameters:
 -   **Tty** - Boolean value, Attach standard streams to a `tty`, including `stdin` if it is not closed.
 -   **OpenStdin** - Boolean value, opens stdin,
 -   **StdinOnce** - Boolean value, close `stdin` after the 1 attached client disconnects.
--   **Env** - A list of environment variables in the form of `VAR=value`
+-   **Env** - A list of environment variables in the form of `["VAR=value"[,"VAR2=value2"]]`
 -   **Labels** - Adds a map of labels to a container. To specify a map: `{"key":"value"[,"key2":"value2"]}`
 -   **Cmd** - Command to run specified as a string or an array of strings.
 -   **Entrypoint** - Set the entry point for the container as a string or an array
@@ -270,8 +273,6 @@ Json Parameters:
            + `volume_name:container_path:ro` to make the bind mount read-only inside the container.
     -   **Links** - A list of links for the container. Each link entry should be
           in the form of `container_name:alias`.
-    -   **LxcConf** - LXC specific configurations. These configurations only
-          work when using the `lxc` execution driver.
     -   **PortBindings** - A map of exposed container ports and the host port they
           should map to. A JSON object in the form
           `{ <port>/<protocol>: [{ "HostPort": "<port>" }] }`
@@ -674,8 +675,6 @@ Status Codes:
 `GET /containers/(id)/stats`
 
 This endpoint returns a live stream of a container's resource usage statistics.
-
-> **Note**: this functionality currently only works when using the *libcontainer* exec-driver.
 
 **Example request**:
 

@@ -63,7 +63,6 @@ type CommonContainer struct {
 	LogPath         string
 	Name            string
 	Driver          string
-	ExecDriver      string
 	// MountLabel contains the options for the 'mount' command
 	MountLabel             string
 	ProcessLabel           string
@@ -244,9 +243,6 @@ func (container *Container) ExitOnNext() {
 // Resize changes the TTY of the process running inside the container
 // to the given height and width. The container must be running.
 func (container *Container) Resize(h, w int) error {
-	if !container.IsRunning() {
-		return derr.ErrorCodeNotRunning.WithArgs(container.ID)
-	}
 	if err := container.command.ProcessConfig.Terminal.Resize(h, w); err != nil {
 		return err
 	}
@@ -261,7 +257,6 @@ func (container *Container) jsonPath() (string, error) {
 	return container.getRootResourcePath("config.json")
 }
 
-// This method must be exported to be used from the lxc template
 // This directory is only usable when the container is running
 func (container *Container) rootfsPath() string {
 	return container.basefs
