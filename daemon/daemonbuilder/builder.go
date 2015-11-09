@@ -106,8 +106,8 @@ func (d Docker) Remove(id string, cfg *daemon.ContainerRmConfig) error {
 }
 
 // Commit creates a new Docker image from an existing Docker container.
-func (d Docker) Commit(c *daemon.Container, cfg *daemon.ContainerCommitConfig) (*image.Image, error) {
-	return d.Daemon.Commit(c, cfg)
+func (d Docker) Commit(name string, cfg *daemon.ContainerCommitConfig) (*image.Image, error) {
+	return d.Daemon.Commit(name, cfg)
 }
 
 // Retain retains an image avoiding it to be removed or overwritten until a corresponding Release() call.
@@ -183,7 +183,7 @@ func (d Docker) Copy(c *daemon.Container, destPath string, src builder.FileInfo,
 
 	// only needed for fixPermissions, but might as well put it before CopyFileWithTar
 	if destExists && destStat.IsDir() {
-		destPath = filepath.Join(destPath, filepath.Base(srcPath))
+		destPath = filepath.Join(destPath, src.Name())
 	}
 
 	if err := idtools.MkdirAllNewAs(filepath.Dir(destPath), 0755, rootUID, rootGID); err != nil {
