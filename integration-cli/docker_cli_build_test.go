@@ -151,6 +151,8 @@ func (s *DockerSuite) TestBuildEnvironmentReplacementExpose(c *check.C) {
   FROM scratch
   ENV port 80
   EXPOSE ${port}
+  ENV ports "  99   100 "
+  EXPOSE ${ports}
   `, true)
 	if err != nil {
 		c.Fatal(err)
@@ -167,8 +169,13 @@ func (s *DockerSuite) TestBuildEnvironmentReplacementExpose(c *check.C) {
 		c.Fatal(err)
 	}
 
-	if _, ok := exposedPorts["80/tcp"]; !ok {
-		c.Fatal("Exposed port 80 from environment not in Config.ExposedPorts on image")
+	exp := []int{80, 99, 100}
+
+	for _, p := range exp {
+		tmp := fmt.Sprintf("%d/tcp", p)
+		if _, ok := exposedPorts[tmp]; !ok {
+			c.Fatalf("Exposed port %d from environment not in Config.ExposedPorts on image", p)
+		}
 	}
 
 }
@@ -6400,4 +6407,31 @@ func (s *DockerSuite) TestBuildSymlinkBasename(c *check.C) {
 	out, _ := dockerCmd(c, "run", "--rm", id, "cat", "asymlink")
 	c.Assert(out, checker.Matches, "bar")
 
+}
+
+// #17827
+func (s *DockerSuite) TestBuildCacheRootSource(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+	name := "testbuildrootsource"
+	ctx, err := fakeContext(`
+	FROM busybox
+	COPY / /data`,
+		map[string]string{
+			"foo": "bar",
+		})
+	c.Assert(err, checker.IsNil)
+	defer ctx.Close()
+
+	// warm up cache
+	_, err = buildImageFromContext(name, ctx, true)
+	c.Assert(err, checker.IsNil)
+
+	// change file, should invalidate cache
+	err = ioutil.WriteFile(filepath.Join(ctx.Dir, "foo"), []byte("baz"), 0644)
+	c.Assert(err, checker.IsNil)
+
+	_, out, err := buildImageFromContextWithOut(name, ctx, true)
+	c.Assert(err, checker.IsNil)
+
+	c.Assert(out, checker.Not(checker.Contains), "Using cache")
 }

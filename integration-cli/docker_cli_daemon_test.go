@@ -794,7 +794,33 @@ func (s *DockerDaemonSuite) TestDaemonBridgeFixedCidr(c *check.C) {
 	}
 }
 
-func (s *DockerDaemonSuite) TestDaemonBridgeFixedCidrFixedCIDREqualBridgeNetwork(c *check.C) {
+func (s *DockerDaemonSuite) TestDaemonBridgeFixedCidr2(c *check.C) {
+	d := s.d
+
+	bridgeName := "external-bridge"
+	bridgeIP := "10.2.2.1/16"
+
+	out, err := createInterface(c, "bridge", bridgeName, bridgeIP)
+	c.Assert(err, check.IsNil, check.Commentf(out))
+	defer deleteInterface(c, bridgeName)
+
+	err = d.StartWithBusybox("--bip", bridgeIP, "--fixed-cidr", "10.2.2.0/24")
+	c.Assert(err, check.IsNil)
+	defer s.d.Restart()
+
+	out, err = d.Cmd("run", "-d", "--name", "bb", "busybox", "top")
+	c.Assert(err, checker.IsNil, check.Commentf(out))
+	defer d.Cmd("stop", "bb")
+
+	out, err = d.Cmd("exec", "bb", "/bin/sh", "-c", "ifconfig eth0 | awk '/inet addr/{print substr($2,6)}'")
+	c.Assert(out, checker.Equals, "10.2.2.0\n")
+
+	out, err = d.Cmd("run", "--rm", "busybox", "/bin/sh", "-c", "ifconfig eth0 | awk '/inet addr/{print substr($2,6)}'")
+	c.Assert(err, checker.IsNil, check.Commentf(out))
+	c.Assert(out, checker.Equals, "10.2.2.2\n")
+}
+
+func (s *DockerDaemonSuite) TestDaemonBridgeFixedCIDREqualBridgeNetwork(c *check.C) {
 	d := s.d
 
 	bridgeName := "external-bridge"
@@ -1802,5 +1828,32 @@ func (s *DockerDaemonSuite) TestDaemonStartWithDefalutTlsHost(c *check.C) {
 	)
 	if !strings.Contains(out, "Server") {
 		c.Fatalf("docker version should return information of server side")
+	}
+}
+
+func (s *DockerDaemonSuite) TestBridgeIPIsExcludedFromAllocatorPool(c *check.C) {
+	defaultNetworkBridge := "docker0"
+	deleteInterface(c, defaultNetworkBridge)
+
+	bridgeIP := "192.169.1.1"
+	bridgeRange := bridgeIP + "/30"
+
+	err := s.d.StartWithBusybox("--bip", bridgeRange)
+	c.Assert(err, check.IsNil)
+	defer s.d.Restart()
+
+	var cont int
+	for {
+		contName := fmt.Sprintf("container%d", cont)
+		_, err = s.d.Cmd("run", "--name", contName, "-d", "busybox", "/bin/sleep", "2")
+		if err != nil {
+			// pool exhausted
+			break
+		}
+		ip, err := s.d.Cmd("inspect", "--format", "'{{.NetworkSettings.IPAddress}}'", contName)
+		c.Assert(err, check.IsNil)
+
+		c.Assert(ip, check.Not(check.Equals), bridgeIP)
+		cont++
 	}
 }
