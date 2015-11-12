@@ -20,7 +20,9 @@ import (
 	"github.com/docker/docker/daemon/network"
 	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/pkg/directory"
+	"github.com/docker/docker/pkg/fileutils"
 	"github.com/docker/docker/pkg/idtools"
+	"github.com/docker/docker/pkg/mount"
 	"github.com/docker/docker/pkg/nat"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/pkg/symlink"
@@ -611,7 +613,9 @@ func (container *Container) buildPortMapInfo(ep libnetwork.Endpoint, networkSett
 		return networkSettings, nil
 	}
 
-	networkSettings.Ports = nat.PortMap{}
+	if networkSettings.Ports == nil {
+		networkSettings.Ports = nat.PortMap{}
+	}
 
 	if expData, ok := driverInfo[netlabel.ExposedPorts]; ok {
 		if exposedPorts, ok := expData.([]types.TransportPort); ok {
@@ -810,6 +814,17 @@ func (container *Container) buildCreateEndpointOptions(n libnetwork.Network) ([]
 		createOptions []libnetwork.EndpointOption
 	)
 
+	if n.Name() == "bridge" || container.NetworkSettings.IsAnonymousEndpoint {
+		createOptions = append(createOptions, libnetwork.CreateOptionAnonymous())
+	}
+
+	// Other configs are applicable only for the endpoint in the network
+	// to which container was connected to on docker run.
+	if n.Name() != container.hostConfig.NetworkMode.NetworkName() &&
+		!(n.Name() == "bridge" && container.hostConfig.NetworkMode.IsDefault()) {
+		return createOptions, nil
+	}
+
 	if container.Config.ExposedPorts != nil {
 		portSpecs = container.Config.ExposedPorts
 	}
@@ -879,10 +894,6 @@ func (container *Container) buildCreateEndpointOptions(n libnetwork.Network) ([]
 		createOptions = append(createOptions, libnetwork.EndpointOptionGeneric(genericOption))
 	}
 
-	if n.Name() == "bridge" || container.NetworkSettings.IsAnonymousEndpoint {
-		createOptions = append(createOptions, libnetwork.CreateOptionAnonymous())
-	}
-
 	return createOptions, nil
 }
 
@@ -938,7 +949,7 @@ func (daemon *Daemon) getNetworkSandbox(container *Container) libnetwork.Sandbox
 	return sb
 }
 
-// ConnectToNetwork connects a container to a netork
+// ConnectToNetwork connects a container to a network
 func (daemon *Daemon) ConnectToNetwork(container *Container, idOrName string) error {
 	if !container.Running {
 		return derr.ErrorCodeNotRunning.WithArgs(container.ID)
@@ -1434,4 +1445,75 @@ func (container *Container) ipcMounts() []execdriver.Mount {
 
 func detachMounted(path string) error {
 	return syscall.Unmount(path, syscall.MNT_DETACH)
+}
+
+func (daemon *Daemon) mountVolumes(container *Container) error {
+	mounts, err := daemon.setupMounts(container)
+	if err != nil {
+		return err
+	}
+
+	for _, m := range mounts {
+		dest, err := container.GetResourcePath(m.Destination)
+		if err != nil {
+			return err
+		}
+
+		var stat os.FileInfo
+		stat, err = os.Stat(m.Source)
+		if err != nil {
+			return err
+		}
+		if err = fileutils.CreateIfNotExists(dest, stat.IsDir()); err != nil {
+			return err
+		}
+
+		opts := "rbind,ro"
+		if m.Writable {
+			opts = "rbind,rw"
+		}
+
+		if err := mount.Mount(m.Source, dest, "bind", opts); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (container *Container) unmountVolumes(forceSyscall bool) error {
+	var (
+		volumeMounts []volume.MountPoint
+		err          error
+	)
+
+	for _, mntPoint := range container.MountPoints {
+		dest, err := container.GetResourcePath(mntPoint.Destination)
+		if err != nil {
+			return err
+		}
+
+		volumeMounts = append(volumeMounts, volume.MountPoint{Destination: dest, Volume: mntPoint.Volume})
+	}
+
+	// Append any network mounts to the list (this is a no-op on Windows)
+	if volumeMounts, err = appendNetworkMounts(container, volumeMounts); err != nil {
+		return err
+	}
+
+	for _, volumeMount := range volumeMounts {
+		if forceSyscall {
+			if err := system.Unmount(volumeMount.Destination); err != nil {
+				logrus.Warnf("%s unmountVolumes: Failed to force umount %v", container.ID, err)
+			}
+		}
+
+		if volumeMount.Volume != nil {
+			if err := volumeMount.Volume.Unmount(); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
