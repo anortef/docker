@@ -63,7 +63,6 @@ DEFAULT_BUNDLES=(
 	cover
 	cross
 	tgz
-	ubuntu
 )
 
 VERSION=$(< ./VERSION)
@@ -230,25 +229,6 @@ binary_extension() {
 	if [ "$(go env GOOS)" = 'windows' ]; then
 		echo -n '.exe'
 	fi
-}
-
-# This helper function walks the current directory looking for directories
-# holding certain files ($1 parameter), and prints their paths on standard
-# output, one per line.
-find_dirs() {
-	find . -not \( \
-		\( \
-			-path './vendor/*' \
-			-o -path './integration-cli/*' \
-			-o -path './contrib/*' \
-			-o -path './pkg/mflag/example/*' \
-			-o -path './.git/*' \
-			-o -path './bundles/*' \
-			-o -path './docs/*' \
-			-o -path './pkg/libcontainer/nsinit/*' \
-		\) \
-		-prune \
-	\) -name "$1" -print0 | xargs -0n1 dirname | sort -u
 }
 
 hash_files() {
