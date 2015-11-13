@@ -12,14 +12,19 @@ import (
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/libnetwork"
+	blkiodev "github.com/opencontainers/runc/libcontainer/configs"
 )
 
 const (
 	defaultVirtualSwitch = "Virtual Switch"
 	platformSupported    = true
 	windowsMinCPUShares  = 1
-	windowsMaxCPUShares  = 9
+	windowsMaxCPUShares  = 10000
 )
+
+func getBlkioWeightDevices(config *runconfig.HostConfig) ([]*blkiodev.WeightDevice, error) {
+	return nil, nil
+}
 
 func parseSecurityOpt(container *Container, config *runconfig.HostConfig) error {
 	return nil
