@@ -192,6 +192,8 @@ type Info struct {
 	SwapLimit          bool
 	CPUCfsPeriod       bool `json:"CpuCfsPeriod"`
 	CPUCfsQuota        bool `json:"CpuCfsQuota"`
+	CPUShares          bool
+	CPUSet             bool
 	IPv4Forwarding     bool
 	BridgeNfIptables   bool
 	BridgeNfIP6tables  bool `json:"BridgeNfIp6tables"`
@@ -360,6 +362,7 @@ type NetworkResource struct {
 
 // EndpointResource contains network resources allocated and used for a container in a network
 type EndpointResource struct {
+	Name        string
 	EndpointID  string
 	MacAddress  string
 	IPv4Address string
