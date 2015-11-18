@@ -188,6 +188,7 @@ type Info struct {
 	Images             int
 	Driver             string
 	DriverStatus       [][2]string
+	Plugins            PluginsInfo
 	MemoryLimit        bool
 	SwapLimit          bool
 	CPUCfsPeriod       bool `json:"CpuCfsPeriod"`
@@ -207,6 +208,8 @@ type Info struct {
 	NEventsListener    int
 	KernelVersion      string
 	OperatingSystem    string
+	OSType             string
+	Architecture       string
 	IndexServerAddress string
 	RegistryConfig     *registry.ServiceConfig
 	InitSha1           string
@@ -223,6 +226,15 @@ type Info struct {
 	ServerVersion      string
 	ClusterStore       string
 	ClusterAdvertise   string
+}
+
+// PluginsInfo is temp struct holds Plugins name
+// registered with docker daemon. It used by Info struct
+type PluginsInfo struct {
+	// List of Volume plugins registered
+	Volume []string
+	// List of Network plugins registered
+	Network []string
 }
 
 // ExecStartCheck is a temp struct used by execStart

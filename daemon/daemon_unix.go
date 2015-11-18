@@ -278,8 +278,8 @@ func checkSystem() error {
 func configureKernelSecuritySupport(config *Config, driverName string) error {
 	if config.EnableSelinuxSupport {
 		if selinuxEnabled() {
-			// As Docker on either btrfs or overlayFS and SELinux are incompatible at present, error on both being enabled
-			if driverName == "btrfs" || driverName == "overlay" {
+			// As Docker on overlayFS and SELinux are incompatible at present, error on overlayfs being enabled
+			if driverName == "overlay" {
 				return fmt.Errorf("SELinux is not supported with the %s graph driver", driverName)
 			}
 			logrus.Debug("SELinux enabled successfully")
@@ -309,19 +309,10 @@ func (daemon *Daemon) networkOptions(dconfig *Config) ([]nwconfig.Option, error)
 
 	options = append(options, nwconfig.OptionDataDir(dconfig.Root))
 
-	if strings.TrimSpace(dconfig.DefaultNetwork) != "" {
-		dn := strings.Split(dconfig.DefaultNetwork, ":")
-		if len(dn) < 2 {
-			return nil, fmt.Errorf("default network daemon config must be of the form NETWORKDRIVER:NETWORKNAME")
-		}
-		options = append(options, nwconfig.OptionDefaultDriver(dn[0]))
-		options = append(options, nwconfig.OptionDefaultNetwork(strings.Join(dn[1:], ":")))
-	} else {
-		dd := runconfig.DefaultDaemonNetworkMode()
-		dn := runconfig.DefaultDaemonNetworkMode().NetworkName()
-		options = append(options, nwconfig.OptionDefaultDriver(string(dd)))
-		options = append(options, nwconfig.OptionDefaultNetwork(dn))
-	}
+	dd := runconfig.DefaultDaemonNetworkMode()
+	dn := runconfig.DefaultDaemonNetworkMode().NetworkName()
+	options = append(options, nwconfig.OptionDefaultDriver(string(dd)))
+	options = append(options, nwconfig.OptionDefaultNetwork(dn))
 
 	if strings.TrimSpace(dconfig.ClusterStore) != "" {
 		kv := strings.Split(dconfig.ClusterStore, "://")

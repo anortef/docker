@@ -359,7 +359,7 @@ func (graph *Graph) register(im image.Descriptor, layerData io.Reader) (err erro
 }
 
 func createRootFilesystemInDriver(graph *Graph, id, parent string) error {
-	if err := graph.driver.Create(id, parent); err != nil {
+	if err := graph.driver.Create(id, parent, ""); err != nil {
 		return fmt.Errorf("Driver %s failed to create image rootfs %s: %s", graph.driver, id, err)
 	}
 	return nil
@@ -477,11 +477,7 @@ func (graph *Graph) ByParent() map[string][]*image.Image {
 		if err != nil {
 			return
 		}
-		if children, exists := byParent[parent.ID]; exists {
-			byParent[parent.ID] = append(children, img)
-		} else {
-			byParent[parent.ID] = []*image.Image{img}
-		}
+		byParent[parent.ID] = append(byParent[parent.ID], img)
 	})
 	return byParent
 }
