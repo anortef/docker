@@ -31,7 +31,13 @@ func (daemon *Daemon) ContainerCreate(params *ContainerCreateConfig) (types.Cont
 		return types.ContainerCreateResponse{ID: "", Warnings: warnings}, err
 	}
 
-	daemon.adaptContainerSettings(params.HostConfig, params.AdjustCPUShares)
+	if params.HostConfig == nil {
+		params.HostConfig = &runconfig.HostConfig{}
+	}
+	err = daemon.adaptContainerSettings(params.HostConfig, params.AdjustCPUShares)
+	if err != nil {
+		return types.ContainerCreateResponse{ID: "", Warnings: warnings}, err
+	}
 
 	container, err := daemon.create(params)
 	if err != nil {
@@ -62,21 +68,12 @@ func (daemon *Daemon) create(params *ContainerCreateConfig) (retC *Container, re
 		return nil, err
 	}
 
-	if params.HostConfig == nil {
-		params.HostConfig = &runconfig.HostConfig{}
-	}
-	if params.HostConfig.SecurityOpt == nil {
-		params.HostConfig.SecurityOpt, err = daemon.generateSecurityOpt(params.HostConfig.IpcMode, params.HostConfig.PidMode)
-		if err != nil {
-			return nil, err
-		}
-	}
 	if container, err = daemon.newContainer(params.Name, params.Config, imgID); err != nil {
 		return nil, err
 	}
 	defer func() {
 		if retErr != nil {
-			if err := daemon.rm(container, false); err != nil {
+			if err := daemon.ContainerRm(container.ID, &ContainerRmConfig{ForceRemove: true}); err != nil {
 				logrus.Errorf("Clean up Error! Cannot destroy container %s: %v", container.ID, err)
 			}
 		}

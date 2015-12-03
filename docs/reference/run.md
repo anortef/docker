@@ -244,12 +244,12 @@ of the containers.
 ## Network settings
 
     --dns=[]         : Set custom dns servers for the container
-    --net="bridge"   : Connects a container to a network
-                        'bridge': creates a new network stack for the container on the docker bridge
-                        'none': no networking for this container
-                        'container:<name|id>': reuses another container network stack
-                        'host': use the host network stack inside the container
-                        'NETWORK': connects the container to user-created network using `docker network create` command
+    --net="bridge"   : Connect a container to a network
+                        'bridge': create a network stack on the default Docker bridge
+                        'none': no networking
+                        'container:<name|id>': reuse another container's network stack
+                        'host': use the Docker host network stack
+                        '<network-name>|<network-id>': connect to a user-defined network
     --add-host=""    : Add a line to /etc/hosts (host:IP)
     --mac-address="" : Sets the container's Ethernet device's MAC address
 
@@ -1297,6 +1297,14 @@ above, or already defined by the developer with a Dockerfile `ENV`:
     declare -x deep="purple"
 
 Similarly the operator can set the **hostname** with `-h`.
+
+### TMPFS (mount tmpfs filesystems)
+
+    --tmpfs=[]: Create a tmpfs mount with: container-dir[:<options>], where the options are identical to the Linux `mount -t tmpfs -o` command.
+
+    Underlying content from the "container-dir" is copied into tmpfs.
+
+    $ docker run -d --tmpfs /run:rw,noexec,nosuid,size=65536k my_image
 
 ### VOLUME (shared filesystems)
 

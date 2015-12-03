@@ -39,10 +39,15 @@ import (
 	"github.com/opencontainers/runc/libcontainer/label"
 )
 
-// DefaultPathEnv is unix style list of directories to search for
-// executables. Each directory is separated from the next by a colon
-// ':' character .
-const DefaultPathEnv = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+const (
+	// DefaultPathEnv is unix style list of directories to search for
+	// executables. Each directory is separated from the next by a colon
+	// ':' character .
+	DefaultPathEnv = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+	// DefaultSHMSize is the default size (64MB) of the SHM which will be mounted in the container
+	DefaultSHMSize int64 = 67108864
+)
 
 // Container holds the fields specific to unixen implementations. See
 // CommonContainer for standard fields common to all containers.
@@ -296,11 +301,7 @@ func (daemon *Daemon) populateCommand(c *Container, env []string) error {
 		Rlimits:           rlimits,
 		BlkioWeightDevice: weightDevices,
 		OomKillDisable:    c.hostConfig.OomKillDisable,
-		MemorySwappiness:  -1,
-	}
-
-	if c.hostConfig.MemorySwappiness != nil {
-		resources.MemorySwappiness = *c.hostConfig.MemorySwappiness
+		MemorySwappiness:  *c.hostConfig.MemorySwappiness,
 	}
 
 	processConfig := execdriver.ProcessConfig{
@@ -345,6 +346,7 @@ func (daemon *Daemon) populateCommand(c *Container, env []string) error {
 		GIDMapping:         gidMap,
 		GroupAdd:           c.hostConfig.GroupAdd,
 		Ipc:                ipc,
+		OomScoreAdj:        c.hostConfig.OomScoreAdj,
 		Pid:                pid,
 		ReadonlyRootfs:     c.hostConfig.ReadonlyRootfs,
 		RemappedRoot:       remappedRoot,
@@ -1358,11 +1360,12 @@ func (daemon *Daemon) setupIpcDirs(container *Container) error {
 			return err
 		}
 
-		// When ShmSize is 0 or less, the SHM size is set to 64MB.
-		if container.hostConfig.ShmSize <= 0 {
-			container.hostConfig.ShmSize = 67108864
+		shmSize := DefaultSHMSize
+		if container.hostConfig.ShmSize != nil {
+			shmSize = *container.hostConfig.ShmSize
 		}
-		shmproperty := "mode=1777,size=" + strconv.FormatInt(container.hostConfig.ShmSize, 10)
+
+		shmproperty := "mode=1777,size=" + strconv.FormatInt(shmSize, 10)
 		if err := syscall.Mount("shm", shmPath, "tmpfs", uintptr(syscall.MS_NOEXEC|syscall.MS_NOSUID|syscall.MS_NODEV), label.FormatMountLabel(shmproperty, container.getMountLabel())); err != nil {
 			return fmt.Errorf("mounting shm tmpfs: %s", err)
 		}
@@ -1527,4 +1530,16 @@ func (container *Container) unmountVolumes(forceSyscall bool) error {
 	}
 
 	return nil
+}
+
+func (container *Container) tmpfsMounts() []execdriver.Mount {
+	var mounts []execdriver.Mount
+	for dest, data := range container.hostConfig.Tmpfs {
+		mounts = append(mounts, execdriver.Mount{
+			Source:      "tmpfs",
+			Destination: dest,
+			Data:        data,
+		})
+	}
+	return mounts
 }

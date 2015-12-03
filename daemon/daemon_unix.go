@@ -112,11 +112,7 @@ func checkKernel() error {
 
 // adaptContainerSettings is called during container creation to modify any
 // settings necessary in the HostConfig structure.
-func (daemon *Daemon) adaptContainerSettings(hostConfig *runconfig.HostConfig, adjustCPUShares bool) {
-	if hostConfig == nil {
-		return
-	}
-
+func (daemon *Daemon) adaptContainerSettings(hostConfig *runconfig.HostConfig, adjustCPUShares bool) error {
 	if adjustCPUShares && hostConfig.CPUShares > 0 {
 		// Handle unsupported CPUShares
 		if hostConfig.CPUShares < linuxMinCPUShares {
@@ -131,6 +127,23 @@ func (daemon *Daemon) adaptContainerSettings(hostConfig *runconfig.HostConfig, a
 		// By default, MemorySwap is set to twice the size of Memory.
 		hostConfig.MemorySwap = hostConfig.Memory * 2
 	}
+	if hostConfig.ShmSize == nil {
+		shmSize := DefaultSHMSize
+		hostConfig.ShmSize = &shmSize
+	}
+	var err error
+	if hostConfig.SecurityOpt == nil {
+		hostConfig.SecurityOpt, err = daemon.generateSecurityOpt(hostConfig.IpcMode, hostConfig.PidMode)
+		if err != nil {
+			return err
+		}
+	}
+	if hostConfig.MemorySwappiness == nil {
+		defaultSwappiness := int64(-1)
+		hostConfig.MemorySwappiness = &defaultSwappiness
+	}
+
+	return nil
 }
 
 // verifyPlatformContainerSettings performs platform-specific validation of the
@@ -142,6 +155,10 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *runconfig.HostC
 	warnings, err := daemon.verifyExperimentalContainerSettings(hostConfig, config)
 	if err != nil {
 		return warnings, err
+	}
+
+	if hostConfig.ShmSize != nil && *hostConfig.ShmSize <= 0 {
+		return warnings, fmt.Errorf("SHM size must be greater then 0")
 	}
 
 	// memory subsystem checks and adjustments
@@ -246,6 +263,9 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *runconfig.HostC
 		return warnings, fmt.Errorf("Your kernel does not support oom kill disable.")
 	}
 
+	if hostConfig.OomScoreAdj < -1000 || hostConfig.OomScoreAdj > 1000 {
+		return warnings, fmt.Errorf("Invalid value %d, range for oom score adj is [-1000, 1000].", hostConfig.OomScoreAdj)
+	}
 	if sysInfo.IPv4ForwardingDisabled {
 		warnings = append(warnings, "IPv4 forwarding is disabled. Networking will not work.")
 		logrus.Warnf("IPv4 forwarding is disabled. Networking will not work")

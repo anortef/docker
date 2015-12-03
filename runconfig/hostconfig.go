@@ -211,14 +211,16 @@ type HostConfig struct {
 	GroupAdd        []string              // List of additional groups that the container process will run as
 	IpcMode         IpcMode               // IPC namespace to use for the container
 	Links           []string              // List of links (in the name:alias form)
+	OomScoreAdj     int                   // Container preference for OOM-killing
 	OomKillDisable  bool                  // Whether to disable OOM Killer or not
 	PidMode         PidMode               // PID namespace to use for the container
 	Privileged      bool                  // Is the container in privileged mode
 	PublishAllPorts bool                  // Should docker publish all exposed port for the container
 	ReadonlyRootfs  bool                  // Is the container root filesystem in read-only
 	SecurityOpt     []string              // List of string values to customize labels for MLS systems, such as SELinux.
+	Tmpfs           map[string]string     `json:",omitempty"` // List of tmpfs (mounts) used for the container
 	UTSMode         UTSMode               // UTS namespace to use for the container
-	ShmSize         int64                 // Total shm memory usage
+	ShmSize         *int64                // Total shm memory usage
 
 	// Applicable to Windows
 	ConsoleSize [2]int         // Initial console size

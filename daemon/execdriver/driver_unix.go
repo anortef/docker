@@ -28,6 +28,7 @@ type Mount struct {
 	Writable    bool   `json:"writable"`
 	Private     bool   `json:"private"`
 	Slave       bool   `json:"slave"`
+	Data        string `json:"data"`
 }
 
 // Resources contains all resource configs for a driver.
@@ -113,6 +114,7 @@ type Command struct {
 	GIDMapping         []idtools.IDMap   `json:"gidmapping"`
 	GroupAdd           []string          `json:"group_add"`
 	Ipc                *Ipc              `json:"ipc"`
+	OomScoreAdj        int               `json:"oom_score_adj"`
 	Pid                *Pid              `json:"pid"`
 	ReadonlyRootfs     bool              `json:"readonly_rootfs"`
 	RemappedRoot       *User             `json:"remap_root"`
@@ -161,6 +163,7 @@ func SetupCgroups(container *configs.Config, c *Command) error {
 		container.Cgroups.Memory = c.Resources.Memory
 		container.Cgroups.MemoryReservation = c.Resources.MemoryReservation
 		container.Cgroups.MemorySwap = c.Resources.MemorySwap
+		container.Cgroups.KernelMemory = c.Resources.KernelMemory
 		container.Cgroups.CpusetCpus = c.Resources.CpusetCpus
 		container.Cgroups.CpusetMems = c.Resources.CpusetMems
 		container.Cgroups.CpuPeriod = c.Resources.CPUPeriod

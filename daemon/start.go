@@ -29,15 +29,20 @@ func (daemon *Daemon) ContainerStart(name string, hostConfig *runconfig.HostConf
 		// This is kept for backward compatibility - hostconfig should be passed when
 		// creating a container, not during start.
 		if hostConfig != nil {
+			logrus.Warn("DEPRECATED: Setting host configuration options when the container starts is deprecated and will be removed in Docker 1.12")
 			container.Lock()
 			if err := parseSecurityOpt(container, hostConfig); err != nil {
 				container.Unlock()
 				return err
 			}
 			container.Unlock()
+			if err := daemon.adaptContainerSettings(hostConfig, false); err != nil {
+				return err
+			}
 			if err := daemon.setHostConfig(container, hostConfig); err != nil {
 				return err
 			}
+			initDNSHostConfig(container)
 		}
 	} else {
 		if hostConfig != nil {
@@ -128,6 +133,7 @@ func (daemon *Daemon) containerStart(container *Container) (err error) {
 		return err
 	}
 	mounts = append(mounts, container.ipcMounts()...)
+	mounts = append(mounts, container.tmpfsMounts()...)
 
 	container.command.Mounts = mounts
 	if err := daemon.waitForStart(container); err != nil {
