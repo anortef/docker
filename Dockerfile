@@ -55,6 +55,7 @@ RUN apt-get update && apt-get install -y \
 	libltdl-dev \
 	libsqlite3-dev \
 	libsystemd-journal-dev \
+	libtool \
 	mercurial \
 	parallel \
 	pkg-config \
@@ -83,7 +84,7 @@ RUN cd /usr/local/lvm2 \
 # see https://git.fedorahosted.org/cgit/lvm2.git/tree/INSTALL
 
 # Install Go
-ENV GO_VERSION 1.5.1
+ENV GO_VERSION 1.5.2
 RUN curl -sSL  "https://storage.googleapis.com/golang/go${GO_VERSION}.linux-amd64.tar.gz" | tar -v -C /usr/local -xz
 ENV PATH /go/bin:/usr/local/go/bin:$PATH
 ENV GOPATH /go:/go/src/github.com/docker/docker/vendor
@@ -124,6 +125,23 @@ RUN set -x \
 	&& curl -sSL https://s3.dockerproject.org/darwin/${OSX_SDK}.tar.xz -o "${OSXCROSS_PATH}/tarballs/${OSX_SDK}.tar.xz" \
 	&& UNATTENDED=yes OSX_VERSION_MIN=10.6 ${OSXCROSS_PATH}/build.sh
 ENV PATH /osxcross/target/bin:$PATH
+
+# install seccomp
+# this can be changed to the ubuntu package libseccomp-dev if dockerinit is removed,
+# we need libseccomp.a (which the package does not provide) for dockerinit
+ENV SECCOMP_VERSION v2.2.3
+RUN set -x \
+	&& export SECCOMP_PATH=$(mktemp -d) \
+	&& git clone https://github.com/seccomp/libseccomp.git "$SECCOMP_PATH" \
+	&& ( \
+		cd "$SECCOMP_PATH" \
+		&& git checkout "$SECCOMP_VERSION" \
+		&& ./autogen.sh \
+		&& ./configure --prefix=/usr \
+		&& make \
+		&& make install \
+	) \
+	&& rm -rf "$SECCOMP_PATH"
 
 # Install registry
 ENV REGISTRY_COMMIT ec87e9b6971d831f0eff752ddb54fb64693e51cd
@@ -168,7 +186,7 @@ RUN useradd --create-home --gid docker unprivilegeduser
 
 VOLUME /var/lib/docker
 WORKDIR /go/src/github.com/docker/docker
-ENV DOCKER_BUILDTAGS apparmor selinux
+ENV DOCKER_BUILDTAGS apparmor seccomp selinux
 
 # Let us use a .bashrc file
 RUN ln -sfv $PWD/.bashrc ~/.bashrc

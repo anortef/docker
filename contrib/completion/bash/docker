@@ -1133,9 +1133,15 @@ _docker_network_disconnect() {
 }
 
 _docker_network_inspect() {
+	case "$prev" in
+		--format|-f)
+			return
+			;;
+	esac
+
 	case "$cur" in
 		-*)
-			COMPREPLY=( $( compgen -W "--help" -- "$cur" ) )
+			COMPREPLY=( $( compgen -W "--format -f --help" -- "$cur" ) )
 			;;
 		*)
 			__docker_networks
@@ -1366,6 +1372,8 @@ _docker_run() {
 		--cpuset-mems
 		--cpu-shares
 		--device
+		--device-read-bps
+		--device-write-bps
 		--dns
 		--dns-opt
 		--dns-search
@@ -1538,7 +1546,7 @@ _docker_run() {
 					fi
 					;;
 				*)
-					COMPREPLY=( $( compgen -W "label apparmor" -S ":" -- "$cur") )
+					COMPREPLY=( $( compgen -W "label apparmor seccomp" -S ":" -- "$cur") )
 					__docker_nospace
 					;;
 			esac

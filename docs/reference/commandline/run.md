@@ -17,7 +17,7 @@ parent = "smn_cli"
       -a, --attach=[]               Attach to STDIN, STDOUT or STDERR
       --add-host=[]                 Add a custom host-to-IP mapping (host:ip)
       --blkio-weight=0              Block IO weight (relative weight)
-      --blkio-weight-device=""      Block IO weight (relative device weight, format: `DEVICE_NAME:WEIGHT`)
+      --blkio-weight-device=[]      Block IO weight (relative device weight, format: `DEVICE_NAME:WEIGHT`)
       --cpu-shares=0                CPU shares (relative weight)
       --cap-add=[]                  Add Linux capabilities
       --cap-drop=[]                 Drop Linux capabilities
@@ -29,6 +29,8 @@ parent = "smn_cli"
       --cpuset-mems=""              Memory nodes (MEMs) in which to allow execution (0-3, 0,1)
       -d, --detach=false            Run container in background and print container ID
       --device=[]                   Add a host device to the container
+      --device-read-bps=[]          Limit read rate (bytes per second) from a device (e.g., --device-read-bps=/dev/sda:1mb)
+      --device-write-bps=[]         Limit write rate (bytes per second) to a device (e.g., --device-write-bps=/dev/sda:1mb)
       --disable-content-trust=true  Skip image verification
       --dns=[]                      Set custom DNS servers
       --dns-opt=[]                  Set custom DNS options
@@ -84,6 +86,7 @@ parent = "smn_cli"
                                     If 'host-src' is missing, then docker creates a new volume.
                                     If neither 'rw' or 'ro' is specified then the volume is mounted
                                     in read-write mode.
+      --volume-driver=""            Container's volume driver
       --volumes-from=[]             Mount volumes from the specified container(s)
       -w, --workdir=""              Working directory inside the container
 

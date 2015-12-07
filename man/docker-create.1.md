@@ -20,6 +20,8 @@ docker-create - Create a new container
 [**--cpuset-cpus**[=*CPUSET-CPUS*]]
 [**--cpuset-mems**[=*CPUSET-MEMS*]]
 [**--device**[=*[]*]]
+[**--device-read-bps**[=*[]*]]
+[**--device-write-bps**[=*[]*]]
 [**--dns**[=*[]*]]
 [**--dns-search**[=*[]*]]
 [**--dns-opt**[=*[]*]]
@@ -63,6 +65,7 @@ docker-create - Create a new container
 [**--ulimit**[=*[]*]]
 [**--uts**[=*[]*]]
 [**-v**|**--volume**[=*[]*]]
+[**--volume-driver**[=*DRIVER*]]
 [**--volumes-from**[=*[]*]]
 [**-w**|**--workdir**[=*WORKDIR*]]
 IMAGE [COMMAND] [ARG...]
@@ -123,6 +126,12 @@ two memory nodes.
 
 **--device**=[]
    Add a host device to the container (e.g. --device=/dev/sdc:/dev/xvdc:rwm)
+
+**--device-read-bps**=[]
+    Limit read rate (bytes per second) from a device (e.g. --device-read-bps=/dev/sda:1mb)
+
+**--device-write-bps**=[]
+    Limit write rate (bytes per second) to a device (e.g. --device-write-bps=/dev/sda:1mb)
 
 **--dns**=[]
    Set custom DNS servers
@@ -304,6 +313,11 @@ any options, the systems uses the following options:
 
 **-v**, **--volume**=[]
    Bind mount a volume (e.g., from the host: -v /host:/container, from Docker: -v /container)
+
+**--volume-driver**=""
+   Container's volume driver. This driver creates volumes specified either from
+   a Dockerfile's `VOLUME` instruction or from the `docker run -v` flag.
+   See **docker-volume-create(1)** for full details.
 
 **--volumes-from**=[]
    Mount volumes from the specified container(s)

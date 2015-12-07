@@ -3384,17 +3384,17 @@ func (s *DockerSuite) TestRunContainerNetModeWithDnsMacHosts(c *check.C) {
 	}
 
 	out, _, err = dockerCmdWithError("run", "--dns", "1.2.3.4", "--net=container:parent", "busybox")
-	if err == nil || !strings.Contains(out, "Conflicting options: --dns and the network mode") {
+	if err == nil || !strings.Contains(out, runconfig.ErrConflictNetworkAndDNS.Error()) {
 		c.Fatalf("run --net=container with --dns should error out")
 	}
 
 	out, _, err = dockerCmdWithError("run", "--mac-address", "92:d0:c6:0a:29:33", "--net=container:parent", "busybox")
-	if err == nil || !strings.Contains(out, "--mac-address and the network mode") {
+	if err == nil || !strings.Contains(out, runconfig.ErrConflictContainerNetworkAndMac.Error()) {
 		c.Fatalf("run --net=container with --mac-address should error out")
 	}
 
 	out, _, err = dockerCmdWithError("run", "--add-host", "test:192.168.2.109", "--net=container:parent", "busybox")
-	if err == nil || !strings.Contains(out, "--add-host and the network mode") {
+	if err == nil || !strings.Contains(out, runconfig.ErrConflictNetworkHosts.Error()) {
 		c.Fatalf("run --net=container with --add-host should error out")
 	}
 }
@@ -3405,17 +3405,17 @@ func (s *DockerSuite) TestRunContainerNetModeWithExposePort(c *check.C) {
 	dockerCmd(c, "run", "-d", "--name", "parent", "busybox", "top")
 
 	out, _, err := dockerCmdWithError("run", "-p", "5000:5000", "--net=container:parent", "busybox")
-	if err == nil || !strings.Contains(out, "Conflicting options: -p, -P, --publish-all, --publish and the network mode (--net)") {
+	if err == nil || !strings.Contains(out, runconfig.ErrConflictNetworkPublishPorts.Error()) {
 		c.Fatalf("run --net=container with -p should error out")
 	}
 
 	out, _, err = dockerCmdWithError("run", "-P", "--net=container:parent", "busybox")
-	if err == nil || !strings.Contains(out, "Conflicting options: -p, -P, --publish-all, --publish and the network mode (--net)") {
+	if err == nil || !strings.Contains(out, runconfig.ErrConflictNetworkPublishPorts.Error()) {
 		c.Fatalf("run --net=container with -P should error out")
 	}
 
 	out, _, err = dockerCmdWithError("run", "--expose", "5000", "--net=container:parent", "busybox")
-	if err == nil || !strings.Contains(out, "Conflicting options: --expose and the network mode (--net)") {
+	if err == nil || !strings.Contains(out, runconfig.ErrConflictNetworkExposePorts.Error()) {
 		c.Fatalf("run --net=container with --expose should error out")
 	}
 }
@@ -3762,6 +3762,29 @@ func (s *DockerSuite) TestRunInvalidReference(c *check.C) {
 	}
 }
 
+// Test fix for issue #17854
+func (s *DockerSuite) TestRunInitLayerPathOwnership(c *check.C) {
+	// Not applicable on Windows as it does not support Linux uid/gid ownership
+	testRequires(c, DaemonIsLinux)
+	name := "testetcfileownership"
+	_, err := buildImage(name,
+		`FROM busybox
+		RUN echo 'dockerio:x:1001:1001::/bin:/bin/false' >> /etc/passwd
+		RUN echo 'dockerio:x:1001:' >> /etc/group
+		RUN chown dockerio:dockerio /etc`,
+		true)
+	if err != nil {
+		c.Fatal(err)
+	}
+
+	// Test that dockerio ownership of /etc is retained at runtime
+	out, _ := dockerCmd(c, "run", "--rm", name, "stat", "-c", "%U:%G", "/etc")
+	out = strings.TrimSpace(out)
+	if out != "dockerio:dockerio" {
+		c.Fatalf("Wrong /etc ownership: expected dockerio:dockerio, got %q", out)
+	}
+}
+
 func (s *DockerSuite) TestRunWithOomScoreAdj(c *check.C) {
 	testRequires(c, DaemonIsLinux)
 
@@ -3787,5 +3810,61 @@ func (s *DockerSuite) TestRunWithOomScoreAdjInvalidRange(c *check.C) {
 	expected = "Invalid value -1001, range for oom score adj is [-1000, 1000]."
 	if !strings.Contains(out, expected) {
 		c.Fatalf("Expected output to contain %q, got %q instead", expected, out)
+	}
+}
+
+// TestRunSeccompProfileDenyUnshare checks that 'docker run --security-opt seccomp:/tmp/profile.json jess/unshare unshare' exits with operation not permitted.
+func (s *DockerSuite) TestRunSeccompProfileDenyUnshare(c *check.C) {
+	testRequires(c, SameHostDaemon)
+	jsonData := `{
+	"defaultAction": "SCMP_ACT_ALLOW",
+	"syscalls": [
+		{
+			"name": "unshare",
+			"action": "SCMP_ACT_ERRNO"
+		}
+	]
+}`
+	tmpFile, err := ioutil.TempFile("", "profile.json")
+	defer tmpFile.Close()
+	if err != nil {
+		c.Fatal(err)
+	}
+
+	if _, err := tmpFile.Write([]byte(jsonData)); err != nil {
+		c.Fatal(err)
+	}
+	runCmd := exec.Command(dockerBinary, "run", "--security-opt", "seccomp:"+tmpFile.Name(), "jess/unshare", "unshare", "-p", "-m", "-f", "-r", "mount", "-t", "proc", "none", "/proc")
+	out, _, _ := runCommandWithOutput(runCmd)
+	if !strings.Contains(out, "Operation not permitted") {
+		c.Fatalf("expected unshare with seccomp profile denied to fail, got %s", out)
+	}
+}
+
+// TestRunSeccompProfileDenyChmod checks that 'docker run --security-opt seccomp:/tmp/profile.json busybox chmod 400 /etc/hostname' exits with operation not permitted.
+func (s *DockerSuite) TestRunSeccompProfileDenyChmod(c *check.C) {
+	testRequires(c, SameHostDaemon)
+	jsonData := `{
+	"defaultAction": "SCMP_ACT_ALLOW",
+	"syscalls": [
+		{
+			"name": "chmod",
+			"action": "SCMP_ACT_ERRNO"
+		}
+	]
+}`
+	tmpFile, err := ioutil.TempFile("", "profile.json")
+	defer tmpFile.Close()
+	if err != nil {
+		c.Fatal(err)
+	}
+
+	if _, err := tmpFile.Write([]byte(jsonData)); err != nil {
+		c.Fatal(err)
+	}
+	runCmd := exec.Command(dockerBinary, "run", "--security-opt", "seccomp:"+tmpFile.Name(), "busybox", "chmod", "400", "/etc/hostname")
+	out, _, _ := runCommandWithOutput(runCmd)
+	if !strings.Contains(out, "Operation not permitted") {
+		c.Fatalf("expected chmod with seccomp profile denied to fail, got %s", out)
 	}
 }

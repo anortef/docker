@@ -50,6 +50,20 @@ func (s *DockerSuite) TestVolumeCliInspect(c *check.C) {
 	c.Assert(strings.TrimSpace(out), check.Equals, "test")
 }
 
+func (s *DockerSuite) TestVolumeCliInspectMulti(c *check.C) {
+	dockerCmd(c, "volume", "create", "--name", "test1")
+	dockerCmd(c, "volume", "create", "--name", "test2")
+
+	out, _, err := dockerCmdWithError("volume", "inspect", "--format='{{ .Name }}'", "test1", "test2", "doesntexist")
+	c.Assert(err, checker.NotNil)
+	outArr := strings.Split(strings.TrimSpace(out), "\n")
+	c.Assert(len(outArr), check.Equals, 3, check.Commentf("\n%s", out))
+
+	c.Assert(strings.Contains(out, "test1\n"), check.Equals, true)
+	c.Assert(strings.Contains(out, "test2\n"), check.Equals, true)
+	c.Assert(strings.Contains(out, "Error: No such volume: doesntexist\n"), check.Equals, true)
+}
+
 func (s *DockerSuite) TestVolumeCliLs(c *check.C) {
 	prefix := ""
 	if daemonPlatform == "windows" {
@@ -164,4 +178,14 @@ func (s *DockerSuite) TestVolumeCliNoArgs(c *check.C) {
 	c.Assert(err, check.NotNil, check.Commentf(stderr))
 	c.Assert(stderr, checker.Contains, usage)
 	c.Assert(stderr, checker.Contains, "flag provided but not defined: --no-such-flag")
+}
+
+func (s *DockerSuite) TestVolumeCliInspectTmplError(c *check.C) {
+	out, _ := dockerCmd(c, "volume", "create")
+	name := strings.TrimSpace(out)
+
+	out, exitCode, err := dockerCmdWithError("volume", "inspect", "--format='{{ .FooBar }}'", name)
+	c.Assert(err, checker.NotNil, check.Commentf("Output: %s", out))
+	c.Assert(exitCode, checker.Equals, 1, check.Commentf("Output: %s", out))
+	c.Assert(out, checker.Contains, "Template parsing error")
 }
