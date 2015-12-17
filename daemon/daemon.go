@@ -19,10 +19,10 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution/digest"
-	"github.com/docker/distribution/reference"
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/cliconfig"
+	"github.com/docker/docker/api/types/filters"
+	registrytypes "github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/events"
 	"github.com/docker/docker/daemon/exec"
@@ -34,6 +34,7 @@ import (
 	"github.com/docker/docker/daemon/network"
 	"github.com/docker/docker/distribution"
 	dmetadata "github.com/docker/docker/distribution/metadata"
+	"github.com/docker/docker/distribution/xfer"
 	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/image/tarexport"
@@ -48,16 +49,17 @@ import (
 	"github.com/docker/docker/pkg/mount"
 	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/docker/docker/pkg/nat"
-	"github.com/docker/docker/pkg/parsers/filters"
+	"github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/pkg/signal"
+	"github.com/docker/docker/pkg/streamformatter"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/pkg/stringutils"
 	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/pkg/truncindex"
+	"github.com/docker/docker/reference"
 	"github.com/docker/docker/registry"
 	"github.com/docker/docker/runconfig"
-	"github.com/docker/docker/tag"
 	"github.com/docker/docker/utils"
 	volumedrivers "github.com/docker/docker/volume/drivers"
 	"github.com/docker/docker/volume/local"
@@ -66,6 +68,16 @@ import (
 	lntypes "github.com/docker/libnetwork/types"
 	"github.com/docker/libtrust"
 	"github.com/opencontainers/runc/libcontainer"
+	"golang.org/x/net/context"
+)
+
+const (
+	// maxDownloadConcurrency is the maximum number of downloads that
+	// may take place at a time for each pull.
+	maxDownloadConcurrency = 3
+	// maxUploadConcurrency is the maximum number of uploads that
+	// may take place at a time for each push.
+	maxUploadConcurrency = 5
 )
 
 var (
@@ -125,8 +137,9 @@ type Daemon struct {
 	repository                string
 	containers                *contStore
 	execCommands              *exec.Store
-	tagStore                  tag.Store
-	distributionPool          *distribution.Pool
+	referenceStore            reference.Store
+	downloadManager           *xfer.LayerDownloadManager
+	uploadManager             *xfer.LayerUploadManager
 	distributionMetadataStore dmetadata.Store
 	trustKey                  libtrust.PrivateKey
 	idIndex                   *truncindex.TruncIndex
@@ -149,14 +162,14 @@ type Daemon struct {
 	imageStore                image.Store
 }
 
-// Get looks for a container using the provided information, which could be
+// GetContainer looks for a container using the provided information, which could be
 // one of the following inputs from the caller:
 //  - A full container ID, which will exact match a container in daemon's list
 //  - A container name, which will only exact match via the GetByName() function
 //  - A partial container ID prefix (e.g. short ID) of any length that is
 //    unique enough to only return a single container object
 //  If none of these searches succeed, an error is returned
-func (daemon *Daemon) Get(prefixOrName string) (*container.Container, error) {
+func (daemon *Daemon) GetContainer(prefixOrName string) (*container.Container, error) {
 	if containerByID := daemon.containers.Get(prefixOrName); containerByID != nil {
 		// prefix is an exact match to a full container ID
 		return containerByID, nil
@@ -182,13 +195,13 @@ func (daemon *Daemon) Get(prefixOrName string) (*container.Container, error) {
 // Exists returns a true if a container of the specified ID or name exists,
 // false otherwise.
 func (daemon *Daemon) Exists(id string) bool {
-	c, _ := daemon.Get(id)
+	c, _ := daemon.GetContainer(id)
 	return c != nil
 }
 
 // IsPaused returns a bool indicating if the specified container is paused.
 func (daemon *Daemon) IsPaused(id string) bool {
-	c, _ := daemon.Get(id)
+	c, _ := daemon.GetContainer(id)
 	return c.State.IsPaused()
 }
 
@@ -538,7 +551,7 @@ func (daemon *Daemon) getEventFilter(filter filters.Args) *events.Filter {
 	// incoming container filter can be name, id or partial id, convert to
 	// a full container id
 	for _, cn := range filter.Get("container") {
-		c, err := daemon.Get(cn)
+		c, err := daemon.GetContainer(cn)
 		filter.Del("container", cn)
 		if err == nil {
 			filter.Add("container", c.ID)
@@ -585,7 +598,7 @@ func (daemon *Daemon) children(name string) (map[string]*container.Container, er
 	children := make(map[string]*container.Container)
 
 	err = daemon.containerGraphDB.Walk(name, func(p string, e *graphdb.Entity) error {
-		c, err := daemon.Get(e.ID())
+		c, err := daemon.GetContainer(e.ID())
 		if err != nil {
 			return err
 		}
@@ -738,7 +751,8 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 		return nil, err
 	}
 
-	distributionPool := distribution.NewPool()
+	d.downloadManager = xfer.NewLayerDownloadManager(d.layerStore, maxDownloadConcurrency)
+	d.uploadManager = xfer.NewLayerUploadManager(maxUploadConcurrency)
 
 	ifs, err := image.NewFSStoreBackend(filepath.Join(imageRoot, "imagedb"))
 	if err != nil {
@@ -774,16 +788,16 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 
 	eventsService := events.New()
 
-	tagStore, err := tag.NewTagStore(filepath.Join(imageRoot, "repositories.json"))
+	referenceStore, err := reference.NewReferenceStore(filepath.Join(imageRoot, "repositories.json"))
 	if err != nil {
 		return nil, fmt.Errorf("Couldn't create Tag store repositories: %s", err)
 	}
 
-	if err := restoreCustomImage(d.driver, d.imageStore, d.layerStore, tagStore); err != nil {
+	if err := restoreCustomImage(d.driver, d.imageStore, d.layerStore, referenceStore); err != nil {
 		return nil, fmt.Errorf("Couldn't restore custom images: %s", err)
 	}
 
-	if err := v1.Migrate(config.Root, d.driver.String(), d.layerStore, d.imageStore, tagStore, distributionMetadataStore); err != nil {
+	if err := v1.Migrate(config.Root, d.driver.String(), d.layerStore, d.imageStore, referenceStore, distributionMetadataStore); err != nil {
 		return nil, err
 	}
 
@@ -833,8 +847,7 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 	d.repository = daemonRepo
 	d.containers = &contStore{s: make(map[string]*container.Container)}
 	d.execCommands = exec.NewStore()
-	d.tagStore = tagStore
-	d.distributionPool = distributionPool
+	d.referenceStore = referenceStore
 	d.distributionMetadataStore = distributionMetadataStore
 	d.trustKey = trustKey
 	d.idIndex = truncindex.NewTruncIndex([]string{})
@@ -1030,31 +1043,60 @@ func (daemon *Daemon) TagImage(newTag reference.Named, imageName string) error {
 	if err != nil {
 		return err
 	}
-	newTag = registry.NormalizeLocalReference(newTag)
-	if err := daemon.tagStore.AddTag(newTag, imageID, true); err != nil {
+	if err := daemon.referenceStore.AddTag(newTag, imageID, true); err != nil {
 		return err
 	}
 	daemon.EventsService.Log("tag", newTag.String(), "")
 	return nil
 }
 
+func writeDistributionProgress(cancelFunc func(), outStream io.Writer, progressChan <-chan progress.Progress) {
+	progressOutput := streamformatter.NewJSONStreamFormatter().NewProgressOutput(outStream, false)
+	operationCancelled := false
+
+	for prog := range progressChan {
+		if err := progressOutput.WriteProgress(prog); err != nil && !operationCancelled {
+			logrus.Errorf("error writing progress to client: %v", err)
+			cancelFunc()
+			operationCancelled = true
+			// Don't return, because we need to continue draining
+			// progressChan until it's closed to avoid a deadlock.
+		}
+	}
+}
+
 // PullImage initiates a pull operation. image is the repository name to pull, and
 // tag may be either empty, or indicate a specific tag to pull.
-func (daemon *Daemon) PullImage(ref reference.Named, metaHeaders map[string][]string, authConfig *cliconfig.AuthConfig, outStream io.Writer) error {
+func (daemon *Daemon) PullImage(ref reference.Named, metaHeaders map[string][]string, authConfig *types.AuthConfig, outStream io.Writer) error {
+	// Include a buffer so that slow client connections don't affect
+	// transfer performance.
+	progressChan := make(chan progress.Progress, 100)
+
+	writesDone := make(chan struct{})
+
+	ctx, cancelFunc := context.WithCancel(context.Background())
+
+	go func() {
+		writeDistributionProgress(cancelFunc, outStream, progressChan)
+		close(writesDone)
+	}()
+
 	imagePullConfig := &distribution.ImagePullConfig{
 		MetaHeaders:     metaHeaders,
 		AuthConfig:      authConfig,
-		OutStream:       outStream,
+		ProgressOutput:  progress.ChanOutput(progressChan),
 		RegistryService: daemon.RegistryService,
 		EventsService:   daemon.EventsService,
 		MetadataStore:   daemon.distributionMetadataStore,
-		LayerStore:      daemon.layerStore,
 		ImageStore:      daemon.imageStore,
-		TagStore:        daemon.tagStore,
-		Pool:            daemon.distributionPool,
+		ReferenceStore:  daemon.referenceStore,
+		DownloadManager: daemon.downloadManager,
 	}
 
-	return distribution.Pull(ref, imagePullConfig)
+	err := distribution.Pull(ctx, ref, imagePullConfig)
+	close(progressChan)
+	<-writesDone
+	return err
 }
 
 // ExportImage exports a list of images to the given output stream. The
@@ -1063,26 +1105,43 @@ func (daemon *Daemon) PullImage(ref reference.Named, metaHeaders map[string][]st
 // the same tag are exported. names is the set of tags to export, and
 // outStream is the writer which the images are written to.
 func (daemon *Daemon) ExportImage(names []string, outStream io.Writer) error {
-	imageExporter := tarexport.NewTarExporter(daemon.imageStore, daemon.layerStore, daemon.tagStore)
+	imageExporter := tarexport.NewTarExporter(daemon.imageStore, daemon.layerStore, daemon.referenceStore)
 	return imageExporter.Save(names, outStream)
 }
 
 // PushImage initiates a push operation on the repository named localName.
-func (daemon *Daemon) PushImage(ref reference.Named, metaHeaders map[string][]string, authConfig *cliconfig.AuthConfig, outStream io.Writer) error {
+func (daemon *Daemon) PushImage(ref reference.Named, metaHeaders map[string][]string, authConfig *types.AuthConfig, outStream io.Writer) error {
+	// Include a buffer so that slow client connections don't affect
+	// transfer performance.
+	progressChan := make(chan progress.Progress, 100)
+
+	writesDone := make(chan struct{})
+
+	ctx, cancelFunc := context.WithCancel(context.Background())
+
+	go func() {
+		writeDistributionProgress(cancelFunc, outStream, progressChan)
+		close(writesDone)
+	}()
+
 	imagePushConfig := &distribution.ImagePushConfig{
 		MetaHeaders:     metaHeaders,
 		AuthConfig:      authConfig,
-		OutStream:       outStream,
+		ProgressOutput:  progress.ChanOutput(progressChan),
 		RegistryService: daemon.RegistryService,
 		EventsService:   daemon.EventsService,
 		MetadataStore:   daemon.distributionMetadataStore,
 		LayerStore:      daemon.layerStore,
 		ImageStore:      daemon.imageStore,
-		TagStore:        daemon.tagStore,
+		ReferenceStore:  daemon.referenceStore,
 		TrustKey:        daemon.trustKey,
+		UploadManager:   daemon.uploadManager,
 	}
 
-	return distribution.Push(ref, imagePushConfig)
+	err := distribution.Push(ctx, ref, imagePushConfig)
+	close(progressChan)
+	<-writesDone
+	return err
 }
 
 // LookupImage looks up an image by name and returns it as an ImageInspect
@@ -1093,14 +1152,14 @@ func (daemon *Daemon) LookupImage(name string) (*types.ImageInspect, error) {
 		return nil, fmt.Errorf("No such image: %s", name)
 	}
 
-	refs := daemon.tagStore.References(img.ID())
+	refs := daemon.referenceStore.References(img.ID())
 	repoTags := []string{}
 	repoDigests := []string{}
 	for _, ref := range refs {
 		switch ref.(type) {
-		case reference.Tagged:
+		case reference.NamedTagged:
 			repoTags = append(repoTags, ref.String())
-		case reference.Digested:
+		case reference.Canonical:
 			repoDigests = append(repoDigests, ref.String())
 		}
 	}
@@ -1154,7 +1213,7 @@ func (daemon *Daemon) LookupImage(name string) (*types.ImageInspect, error) {
 // complement of ImageExport.  The input stream is an uncompressed tar
 // ball containing images and metadata.
 func (daemon *Daemon) LoadImage(inTar io.ReadCloser, outStream io.Writer) error {
-	imageExporter := tarexport.NewTarExporter(daemon.imageStore, daemon.layerStore, daemon.tagStore)
+	imageExporter := tarexport.NewTarExporter(daemon.imageStore, daemon.layerStore, daemon.referenceStore)
 	return imageExporter.Load(inTar, outStream)
 }
 
@@ -1210,7 +1269,7 @@ func (daemon *Daemon) ImageHistory(name string) ([]*types.ImageHistory, error) {
 		h.ID = id.String()
 
 		var tags []string
-		for _, r := range daemon.tagStore.References(id) {
+		for _, r := range daemon.referenceStore.References(id) {
 			if _, ok := r.(reference.NamedTagged); ok {
 				tags = append(tags, r.String())
 			}
@@ -1241,13 +1300,12 @@ func (daemon *Daemon) GetImageID(refOrID string) (image.ID, error) {
 
 	// Treat it as a possible tag or digest reference
 	if ref, err := reference.ParseNamed(refOrID); err == nil {
-		ref = registry.NormalizeLocalReference(ref)
-		if id, err := daemon.tagStore.Get(ref); err == nil {
+		if id, err := daemon.referenceStore.Get(ref); err == nil {
 			return id, nil
 		}
-		if tagged, ok := ref.(reference.Tagged); ok {
+		if tagged, ok := ref.(reference.NamedTagged); ok {
 			if id, err := daemon.imageStore.Search(tagged.Tag()); err == nil {
-				for _, namedRef := range daemon.tagStore.References(id) {
+				for _, namedRef := range daemon.referenceStore.References(id) {
 					if namedRef.Name() == ref.Name() {
 						return id, nil
 					}
@@ -1382,12 +1440,7 @@ func setDefaultMtu(config *Config) {
 		return
 	}
 	config.Mtu = defaultNetworkMtu
-	if routeMtu, err := getDefaultRouteMtu(); err == nil {
-		config.Mtu = routeMtu
-	}
 }
-
-var errNoDefaultRoute = errors.New("no default route was found")
 
 // verifyContainerSettings performs validation of the hostconfig and config
 // structures.
@@ -1445,15 +1498,15 @@ func configureVolumes(config *Config, rootUID, rootGID int) (*store.VolumeStore,
 }
 
 // AuthenticateToRegistry checks the validity of credentials in authConfig
-func (daemon *Daemon) AuthenticateToRegistry(authConfig *cliconfig.AuthConfig) (string, error) {
+func (daemon *Daemon) AuthenticateToRegistry(authConfig *types.AuthConfig) (string, error) {
 	return daemon.RegistryService.Auth(authConfig)
 }
 
 // SearchRegistryForImages queries the registry for images matching
 // term. authConfig is used to login.
 func (daemon *Daemon) SearchRegistryForImages(term string,
-	authConfig *cliconfig.AuthConfig,
-	headers map[string][]string) (*registry.SearchResults, error) {
+	authConfig *types.AuthConfig,
+	headers map[string][]string) (*registrytypes.SearchResults, error) {
 	return daemon.RegistryService.Search(term, authConfig, headers)
 }
 

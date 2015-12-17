@@ -7,10 +7,6 @@ import (
 	"github.com/docker/docker/volume"
 )
 
-// DefaultPathEnv is deliberately empty on Windows as the default path will be set by
-// the container. Docker has no context of what the default path should be.
-const DefaultPathEnv = ""
-
 // Container holds fields specific to the Windows implementation. See
 // CommonContainer for standard fields common to all containers.
 type Container struct {
@@ -41,7 +37,7 @@ func (container *Container) IpcMounts() []execdriver.Mount {
 	return nil
 }
 
-// UnmountVolumes explicitely unmounts volumes from the container.
+// UnmountVolumes explicitly unmounts volumes from the container.
 func (container *Container) UnmountVolumes(forceSyscall bool) error {
 	return nil
 }

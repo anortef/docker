@@ -8,11 +8,11 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/pkg/graphdb"
 	"github.com/docker/docker/pkg/nat"
-	"github.com/docker/docker/pkg/parsers/filters"
 )
 
 // iterationAction represents possible outcomes happening during the container iteration.
@@ -162,7 +162,7 @@ func (daemon *Daemon) foldFilter(config *ContainersConfig) (*listContext, error)
 
 	var beforeContFilter, sinceContFilter *container.Container
 	err = psFilters.WalkValues("before", func(value string) error {
-		beforeContFilter, err = daemon.Get(value)
+		beforeContFilter, err = daemon.GetContainer(value)
 		return err
 	})
 	if err != nil {
@@ -170,7 +170,7 @@ func (daemon *Daemon) foldFilter(config *ContainersConfig) (*listContext, error)
 	}
 
 	err = psFilters.WalkValues("since", func(value string) error {
-		sinceContFilter, err = daemon.Get(value)
+		sinceContFilter, err = daemon.GetContainer(value)
 		return err
 	})
 	if err != nil {
@@ -204,14 +204,14 @@ func (daemon *Daemon) foldFilter(config *ContainersConfig) (*listContext, error)
 	}, 1)
 
 	if config.Before != "" && beforeContFilter == nil {
-		beforeContFilter, err = daemon.Get(config.Before)
+		beforeContFilter, err = daemon.GetContainer(config.Before)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	if config.Since != "" && sinceContFilter == nil {
-		sinceContFilter, err = daemon.Get(config.Since)
+		sinceContFilter, err = daemon.GetContainer(config.Since)
 		if err != nil {
 			return nil, err
 		}
@@ -266,7 +266,7 @@ func includeContainerInList(container *container.Container, ctx *listContext) it
 		return excludeContainer
 	}
 
-	// Stop interation when the container arrives to the filter container
+	// Stop iteration when the container arrives to the filter container
 	if ctx.sinceFilter != nil {
 		if container.ID == ctx.sinceFilter.ID {
 			return stopIteration
@@ -351,6 +351,7 @@ func (daemon *Daemon) transformContainer(container *container.Container, ctx *li
 	newC.Created = container.Created.Unix()
 	newC.Status = container.State.String()
 	newC.HostConfig.NetworkMode = string(container.HostConfig.NetworkMode)
+	newC.NetworkSettings = &types.SummaryNetworkSettings{container.NetworkSettings.Networks}
 
 	newC.Ports = []types.Port{}
 	for port, bindings := range container.NetworkSettings.Ports {

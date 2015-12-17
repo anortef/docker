@@ -68,6 +68,7 @@ func (s *DockerSuite) TestContainerApiGetJSONNoFieldsOmitted(c *check.C) {
 		"Ports",
 		"Labels",
 		"Status",
+		"NetworkSettings",
 	}
 
 	// decoding into types.Container do not work since it eventually unmarshal
@@ -1051,7 +1052,7 @@ func (s *DockerSuite) TestContainerApiDeleteNotExist(c *check.C) {
 	status, body, err := sockRequest("DELETE", "/containers/doesnotexist", nil)
 	c.Assert(err, checker.IsNil)
 	c.Assert(status, checker.Equals, http.StatusNotFound)
-	c.Assert(string(body), checker.Matches, "no such id: doesnotexist\n")
+	c.Assert(string(body), checker.Matches, "No such container: doesnotexist\n")
 }
 
 func (s *DockerSuite) TestContainerApiDeleteForce(c *check.C) {

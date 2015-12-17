@@ -16,6 +16,11 @@ func (daemon *Daemon) setupLinkedContainers(container *container.Container) ([]s
 	return nil, nil
 }
 
+// updateContainerNetworkSettings update the network settings
+func (daemon *Daemon) updateContainerNetworkSettings(container *container.Container) error {
+	return nil
+}
+
 func (daemon *Daemon) initializeNetworking(container *container.Container) error {
 	return nil
 }
@@ -92,7 +97,7 @@ func (daemon *Daemon) populateCommand(c *container.Container, env []string) erro
 		}
 	}
 
-	m, err := layer.RWLayerMetadata(daemon.layerStore, c.ID)
+	m, err := daemon.layerStore.Metadata(c.ID)
 	if err != nil {
 		return derr.ErrorCodeGetLayerMetadata.WithArgs(err)
 	}
@@ -160,10 +165,6 @@ func (daemon *Daemon) mountVolumes(container *container.Container) error {
 
 func detachMounted(path string) error {
 	return nil
-}
-
-func getDefaultRouteMtu() (int, error) {
-	return -1, errSystemNotSupported
 }
 
 func killProcessDirectly(container *container.Container) error {

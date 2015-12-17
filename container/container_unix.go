@@ -13,8 +13,8 @@ import (
 	"syscall"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/daemon/execdriver"
-	"github.com/docker/docker/daemon/network"
 	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/pkg/chrootarchive"
 	"github.com/docker/docker/pkg/nat"
@@ -29,15 +29,8 @@ import (
 	"github.com/opencontainers/runc/libcontainer/label"
 )
 
-const (
-	// DefaultPathEnv is unix style list of directories to search for
-	// executables. Each directory is separated from the next by a colon
-	// ':' character .
-	DefaultPathEnv = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-	// DefaultSHMSize is the default size (64MB) of the SHM which will be mounted in the container
-	DefaultSHMSize int64 = 67108864
-)
+// DefaultSHMSize is the default size (64MB) of the SHM which will be mounted in the container
+const DefaultSHMSize int64 = 67108864
 
 // Container holds the fields specific to unixen implementations. See
 // CommonContainer for standard fields common to all containers.
@@ -66,7 +59,7 @@ func (container *Container) CreateDaemonEnvironment(linkedEnv []string) []string
 	}
 	// Setup environment
 	env := []string{
-		"PATH=" + DefaultPathEnv,
+		"PATH=" + system.DefaultPathEnv,
 		"HOSTNAME=" + fullHostname,
 		// Note: we don't set HOME here because it'll get autoset intelligently
 		// based on the value of USER inside dockerinit, but only if it isn't
@@ -403,7 +396,7 @@ func (container *Container) NetworkMounts() []execdriver.Mount {
 				Source:      container.ResolvConfPath,
 				Destination: "/etc/resolv.conf",
 				Writable:    writable,
-				Private:     true,
+				Propagation: volume.DefaultPropagationMode,
 			})
 		}
 	}
@@ -420,7 +413,7 @@ func (container *Container) NetworkMounts() []execdriver.Mount {
 				Source:      container.HostnamePath,
 				Destination: "/etc/hostname",
 				Writable:    writable,
-				Private:     true,
+				Propagation: volume.DefaultPropagationMode,
 			})
 		}
 	}
@@ -437,7 +430,7 @@ func (container *Container) NetworkMounts() []execdriver.Mount {
 				Source:      container.HostsPath,
 				Destination: "/etc/hosts",
 				Writable:    writable,
-				Private:     true,
+				Propagation: volume.DefaultPropagationMode,
 			})
 		}
 	}
@@ -534,7 +527,7 @@ func (container *Container) IpcMounts() []execdriver.Mount {
 			Source:      container.ShmPath,
 			Destination: "/dev/shm",
 			Writable:    true,
-			Private:     true,
+			Propagation: volume.DefaultPropagationMode,
 		})
 	}
 
@@ -544,7 +537,7 @@ func (container *Container) IpcMounts() []execdriver.Mount {
 			Source:      container.MqueuePath,
 			Destination: "/dev/mqueue",
 			Writable:    true,
-			Private:     true,
+			Propagation: volume.DefaultPropagationMode,
 		})
 	}
 	return mounts
