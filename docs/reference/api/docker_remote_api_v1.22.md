@@ -248,7 +248,9 @@ Create a container
              "BlkioWeight": 300,
              "BlkioWeightDevice": [{}],
              "BlkioDeviceReadBps": [{}],
+             "BlkioDeviceReadIOps": [{}],
              "BlkioDeviceWriteBps": [{}],
+             "BlkioDeviceWriteIOps": [{}],
              "MemorySwappiness": 60,
              "OomKillDisable": false,
              "OomScoreAdj": 500,
@@ -306,10 +308,14 @@ Json Parameters:
 -   **CpusetMems** - Memory nodes (MEMs) in which to allow execution (0-3, 0,1). Only effective on NUMA systems.
 -   **BlkioWeight** - Block IO weight (relative weight) accepts a weight value between 10 and 1000.
 -   **BlkioWeightDevice** - Block IO weight (relative device weight) in the form of:        `"BlkioWeightDevice": [{"Path": "device_path", "Weight": weight}]`
--   **BlkioDeviceReadBps** - Limit read rate from a device in form of:	`"BlkioDeviceReadBps": [{"Path": "device_path", "Rate": rate}]`, for example:
+-   **BlkioDeviceReadBps** - Limit read rate (bytes per second) from a device in the form of:	`"BlkioDeviceReadBps": [{"Path": "device_path", "Rate": rate}]`, for example:
 	`"BlkioDeviceReadBps": [{"Path": "/dev/sda", "Rate": "1024"}]"`
--   **BlkioDeviceWriteBps** - Limit write rate to a device in the form of:	`"BlkioDeviceWriteBps": [{"Path": "device_path", "Rate": rate}]`, for example:
+-   **BlkioDeviceWriteBps** - Limit write rate (bytes per second) to a device in the form of:	`"BlkioDeviceWriteBps": [{"Path": "device_path", "Rate": rate}]`, for example:
 	`"BlkioDeviceWriteBps": [{"Path": "/dev/sda", "Rate": "1024"}]"`
+-   **BlkioDeviceReadIOps** - Limit read rate (IO per second) from a device in the form of:	`"BlkioDeviceReadIOps": [{"Path": "device_path", "Rate": rate}]`, for example:
+	`"BlkioDeviceReadIOps": [{"Path": "/dev/sda", "Rate": "1000"}]`
+-   **BlkioDeviceWiiteIOps** - Limit write rate (IO per second) to a device in the form of:	`"BlkioDeviceWriteIOps": [{"Path": "device_path", "Rate": rate}]`, for example:
+	`"BlkioDeviceWriteIOps": [{"Path": "/dev/sda", "Rate": "1000"}]`
 -   **MemorySwappiness** - Tune a container's memory swappiness behavior. Accepts an integer between 0 and 100.
 -   **OomKillDisable** - Boolean value, whether to disable OOM Killer for the container or not.
 -   **OomScoreAdj** - An integer value containing the score given to the container in order to tune OOM killer preferences.
@@ -465,6 +471,8 @@ Return low-level information on the container `id`
 			"BlkioWeightDevice": [{}],
 			"BlkioDeviceReadBps": [{}],
 			"BlkioDeviceWriteBps": [{}],
+			"BlkioDeviceReadIOps": [{}],
+			"BlkioDeviceWriteIOps": [{}],
 			"CapAdd": null,
 			"CapDrop": null,
 			"ContainerIDFile": "",
@@ -854,10 +862,9 @@ This endpoint returns a live stream of a container's resource usage statistics.
                "total_usage" : 36488948,
                "usage_in_kernelmode" : 20000000
             },
-            "system_cpu_usage" : 20091722000000000,
+            "system_cpu_usage" : 20091722000000000,
             "throttling_data" : {}
-         }
-      }
+         }      }
 
 Query Parameters:
 
@@ -913,6 +920,12 @@ Start the container `id`
 **Example response**:
 
     HTTP/1.1 204 No Content
+
+Query Parameters:
+
+-   **detacheys** – Override the key sequence for detaching a
+        container. Format is a single character `[a-Z]` or `ctrl-<value>`
+        where `<value>` is one of: `a-z`, `@`, `^`, `[`, `,` or `_`.
 
 Status Codes:
 
@@ -992,6 +1005,50 @@ Query Parameters
 Status Codes:
 
 -   **204** – no error
+-   **404** – no such container
+-   **500** – server error
+
+### Update a container
+
+`POST /containers/(id)/update`
+
+Update resource configs of one or more containers.
+
+**Example request**:
+
+       POST /containers/(id)/update HTTP/1.1
+       Content-Type: application/json
+
+       {
+           "HostConfig": {
+               "Resources": {
+                   "BlkioWeight": 300,
+                   "CpuShares": 512,
+                   "CpuPeriod": 100000,
+                   "CpuQuota": 50000,
+                   "CpusetCpus": "0,1",
+                   "CpusetMems": "0",
+                   "Memory": 314572800,
+                   "MemorySwap": 514288000,
+                   "MemoryReservation": 209715200,
+                   "KernelMemory": 52428800,
+               }
+           }
+       }
+
+**Example response**:
+
+       HTTP/1.1 200 OK
+       Content-Type: application/json
+
+       {
+           "Warnings": []
+       }
+
+Status Codes:
+
+-   **200** – no error
+-   **400** – bad parameter
 -   **404** – no such container
 -   **500** – server error
 
@@ -1081,6 +1138,9 @@ Attach to the container `id`
 
 Query Parameters:
 
+-   **detacheys** – Override the key sequence for detaching a
+        container. Format is a single character `[a-Z]` or `ctrl-<value>`
+        where `<value>` is one of: `a-z`, `@`, `^`, `[`, `,` or `_`.
 -   **logs** – 1/True/true or 0/False/false, return logs. Default `false`.
 -   **stream** – 1/True/true or 0/False/false, return stream.
         Default `false`.
@@ -1161,6 +1221,9 @@ Implements websocket protocol handshake according to [RFC 6455](http://tools.iet
 
 Query Parameters:
 
+-   **detacheys** – Override the key sequence for detaching a
+        container. Format is a single character `[a-Z]` or `ctrl-<value>`
+        where `<value>` is one of: `a-z`, `@`, `^`, `[`, `,` or `_`.
 -   **logs** – 1/True/true or 0/False/false, return logs. Default `false`.
 -   **stream** – 1/True/true or 0/False/false, return stream.
         Default `false`.
@@ -2368,6 +2431,7 @@ Sets up an exec instance in a running container `id`
        "AttachStdin": false,
        "AttachStdout": true,
        "AttachStderr": true,
+       "DetachKeys": "ctrl-p,ctrl-q",
        "Tty": false,
        "Cmd": [
                      "date"
@@ -2389,6 +2453,9 @@ Json Parameters:
 -   **AttachStdin** - Boolean value, attaches to `stdin` of the `exec` command.
 -   **AttachStdout** - Boolean value, attaches to `stdout` of the `exec` command.
 -   **AttachStderr** - Boolean value, attaches to `stderr` of the `exec` command.
+-   **Detacheys** – Override the key sequence for detaching a
+        container. Format is a single character `[a-Z]` or `ctrl-<value>`
+        where `<value>` is one of: `a-z`, `@`, `^`, `[`, `,` or `_`.
 -   **Tty** - Boolean value to allocate a pseudo-TTY.
 -   **Cmd** - Command to run specified as a string or an array of strings.
 
@@ -2720,7 +2787,7 @@ Status Codes
 
 **Example request**:
 
-    GET /networks HTTP/1.1
+    GET /networks?filters={"type":{"custom":true}} HTTP/1.1
 
 **Example response**:
 
@@ -2786,11 +2853,12 @@ Content-Type: application/json
 ]
 ```
 
-
-
 Query Parameters:
 
-- **filters** - JSON encoded value of the filters (a `map[string][]string`) to process on the networks list. Available filters: `name=[network-names]` , `id=[network-ids]`
+- **filters** - JSON encoded network list filter. The filter value is one of: 
+  -   `name=<network-name>` Matches all or part of a network name.
+  -   `id=<network-id>` Matches all or part of a network id.
+  -   `type=["custom"|"builtin"]` Filters networks by type. The `custom` keyword returns all user-defined networks.
 
 Status Codes:
 

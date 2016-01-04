@@ -12,12 +12,12 @@ import (
 	"syscall"
 
 	"github.com/Sirupsen/logrus"
+	pblkiodev "github.com/docker/docker/api/types/blkiodev"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
-	"github.com/docker/docker/daemon/graphdriver"
 	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
-	pblkiodev "github.com/docker/docker/pkg/blkiodev"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/parsers/kernel"
 	"github.com/docker/docker/pkg/sysinfo"
@@ -43,7 +43,7 @@ const (
 	linuxMinMemory = 4194304
 )
 
-func getBlkioWeightDevices(config *runconfig.HostConfig) ([]*blkiodev.WeightDevice, error) {
+func getBlkioWeightDevices(config *containertypes.HostConfig) ([]*blkiodev.WeightDevice, error) {
 	var stat syscall.Stat_t
 	var blkioWeightDevices []*blkiodev.WeightDevice
 
@@ -58,7 +58,7 @@ func getBlkioWeightDevices(config *runconfig.HostConfig) ([]*blkiodev.WeightDevi
 	return blkioWeightDevices, nil
 }
 
-func parseSecurityOpt(container *container.Container, config *runconfig.HostConfig) error {
+func parseSecurityOpt(container *container.Container, config *containertypes.HostConfig) error {
 	var (
 		labelOpts []string
 		err       error
@@ -85,7 +85,37 @@ func parseSecurityOpt(container *container.Container, config *runconfig.HostConf
 	return err
 }
 
-func getBlkioReadBpsDevices(config *runconfig.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
+func getBlkioReadIOpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
+	var blkioReadIOpsDevice []*blkiodev.ThrottleDevice
+	var stat syscall.Stat_t
+
+	for _, iopsDevice := range config.BlkioDeviceReadIOps {
+		if err := syscall.Stat(iopsDevice.Path, &stat); err != nil {
+			return nil, err
+		}
+		readIOpsDevice := blkiodev.NewThrottleDevice(int64(stat.Rdev/256), int64(stat.Rdev%256), iopsDevice.Rate)
+		blkioReadIOpsDevice = append(blkioReadIOpsDevice, readIOpsDevice)
+	}
+
+	return blkioReadIOpsDevice, nil
+}
+
+func getBlkioWriteIOpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
+	var blkioWriteIOpsDevice []*blkiodev.ThrottleDevice
+	var stat syscall.Stat_t
+
+	for _, iopsDevice := range config.BlkioDeviceWriteIOps {
+		if err := syscall.Stat(iopsDevice.Path, &stat); err != nil {
+			return nil, err
+		}
+		writeIOpsDevice := blkiodev.NewThrottleDevice(int64(stat.Rdev/256), int64(stat.Rdev%256), iopsDevice.Rate)
+		blkioWriteIOpsDevice = append(blkioWriteIOpsDevice, writeIOpsDevice)
+	}
+
+	return blkioWriteIOpsDevice, nil
+}
+
+func getBlkioReadBpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
 	var blkioReadBpsDevice []*blkiodev.ThrottleDevice
 	var stat syscall.Stat_t
 
@@ -100,7 +130,7 @@ func getBlkioReadBpsDevices(config *runconfig.HostConfig) ([]*blkiodev.ThrottleD
 	return blkioReadBpsDevice, nil
 }
 
-func getBlkioWriteBpsDevices(config *runconfig.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
+func getBlkioWriteBpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
 	var blkioWriteBpsDevice []*blkiodev.ThrottleDevice
 	var stat syscall.Stat_t
 
@@ -145,7 +175,7 @@ func checkKernel() error {
 
 // adaptContainerSettings is called during container creation to modify any
 // settings necessary in the HostConfig structure.
-func (daemon *Daemon) adaptContainerSettings(hostConfig *runconfig.HostConfig, adjustCPUShares bool) error {
+func (daemon *Daemon) adaptContainerSettings(hostConfig *containertypes.HostConfig, adjustCPUShares bool) error {
 	if adjustCPUShares && hostConfig.CPUShares > 0 {
 		// Handle unsupported CPUShares
 		if hostConfig.CPUShares < linuxMinCPUShares {
@@ -179,7 +209,7 @@ func (daemon *Daemon) adaptContainerSettings(hostConfig *runconfig.HostConfig, a
 	return nil
 }
 
-func verifyContainerResources(resources *runconfig.Resources) ([]string, error) {
+func verifyContainerResources(resources *containertypes.Resources) ([]string, error) {
 	warnings := []string{}
 	sysInfo := sysinfo.New(true)
 
@@ -234,6 +264,10 @@ func verifyContainerResources(resources *runconfig.Resources) ([]string, error) 
 	if resources.KernelMemory > 0 && !checkKernelVersion(4, 0, 0) {
 		warnings = append(warnings, "You specified a kernel memory limit on a kernel older than 4.0. Kernel memory limits are experimental on older kernels, it won't work as expected and can cause your system to be unstable.")
 		logrus.Warnf("You specified a kernel memory limit on a kernel older than 4.0. Kernel memory limits are experimental on older kernels, it won't work as expected and can cause your system to be unstable.")
+	}
+	if resources.OomKillDisable && !sysInfo.OomKillDisable {
+		resources.OomKillDisable = false
+		return warnings, fmt.Errorf("Your kernel does not support oom kill disable.")
 	}
 
 	// cpu subsystem checks and adjustments
@@ -299,13 +333,23 @@ func verifyContainerResources(resources *runconfig.Resources) ([]string, error) 
 		logrus.Warnf("Your kernel does not support Block I/O write limit in bytes per second. --device-write-bps discarded.")
 		resources.BlkioDeviceWriteBps = []*pblkiodev.ThrottleDevice{}
 	}
+	if len(resources.BlkioDeviceReadIOps) > 0 && !sysInfo.BlkioReadIOpsDevice {
+		warnings = append(warnings, "Your kernel does not support Block read limit in IO per second.")
+		logrus.Warnf("Your kernel does not support Block I/O read limit in IO per second. -device-read-iops discarded.")
+		resources.BlkioDeviceReadIOps = []*pblkiodev.ThrottleDevice{}
+	}
+	if len(resources.BlkioDeviceWriteIOps) > 0 && !sysInfo.BlkioWriteIOpsDevice {
+		warnings = append(warnings, "Your kernel does not support Block write limit in IO per second.")
+		logrus.Warnf("Your kernel does not support Block I/O write limit in IO per second. --device-write-iops discarded.")
+		resources.BlkioDeviceWriteIOps = []*pblkiodev.ThrottleDevice{}
+	}
 
 	return warnings, nil
 }
 
 // verifyPlatformContainerSettings performs platform-specific validation of the
 // hostconfig and config structures.
-func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *runconfig.HostConfig, config *runconfig.Config) ([]string, error) {
+func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *containertypes.HostConfig, config *containertypes.Config) ([]string, error) {
 	warnings := []string{}
 	sysInfo := sysinfo.New(true)
 
@@ -322,11 +366,6 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *runconfig.HostC
 
 	if hostConfig.ShmSize != nil && *hostConfig.ShmSize <= 0 {
 		return warnings, fmt.Errorf("SHM size must be greater then 0")
-	}
-
-	if hostConfig.OomKillDisable && !sysInfo.OomKillDisable {
-		hostConfig.OomKillDisable = false
-		return warnings, fmt.Errorf("Your kernel does not support oom kill disable.")
 	}
 
 	if hostConfig.OomScoreAdj < -1000 || hostConfig.OomScoreAdj > 1000 {
@@ -378,11 +417,6 @@ func configureKernelSecuritySupport(config *Config, driverName string) error {
 		selinuxSetDisabled()
 	}
 	return nil
-}
-
-// MigrateIfDownlevel is a wrapper for AUFS migration for downlevel
-func migrateIfDownlevel(driver graphdriver.Driver, root string) error {
-	return migrateIfAufs(driver, root)
 }
 
 func isBridgeNetworkDisabled(config *Config) bool {
@@ -550,14 +584,14 @@ func initBridgeDriver(controller libnetwork.NetworkController, config *Config) e
 		deferIPv6Alloc = ones <= 80
 
 		if ipamV6Conf == nil {
-			ipamV6Conf = &libnetwork.IpamConf{}
+			ipamV6Conf = &libnetwork.IpamConf{AuxAddresses: make(map[string]string)}
 		}
 		ipamV6Conf.PreferredPool = fCIDRv6.String()
 	}
 
 	if config.Bridge.DefaultGatewayIPv6 != nil {
 		if ipamV6Conf == nil {
-			ipamV6Conf = &libnetwork.IpamConf{}
+			ipamV6Conf = &libnetwork.IpamConf{AuxAddresses: make(map[string]string)}
 		}
 		ipamV6Conf.AuxAddresses["DefaultGatewayIPv6"] = config.Bridge.DefaultGatewayIPv6.String()
 	}
@@ -641,7 +675,7 @@ func setupInitLayer(initLayer string, rootUID, rootGID int) error {
 }
 
 // registerLinks writes the links to a file.
-func (daemon *Daemon) registerLinks(container *container.Container, hostConfig *runconfig.HostConfig) error {
+func (daemon *Daemon) registerLinks(container *container.Container, hostConfig *containertypes.HostConfig) error {
 	if hostConfig == nil || hostConfig.Links == nil {
 		return nil
 	}
@@ -693,7 +727,7 @@ func (daemon *Daemon) conditionalUnmountOnCleanup(container *container.Container
 	daemon.Unmount(container)
 }
 
-func restoreCustomImage(driver graphdriver.Driver, is image.Store, ls layer.Store, rs reference.Store) error {
+func restoreCustomImage(is image.Store, ls layer.Store, rs reference.Store) error {
 	// Unix has no custom images to register
 	return nil
 }

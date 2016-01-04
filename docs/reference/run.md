@@ -123,9 +123,9 @@ pretend to be a TTY (this is what most command line executables expect)
 and pass along signals. All of that is configurable:
 
     -a=[]           : Attach to `STDIN`, `STDOUT` and/or `STDERR`
-    -t=false        : Allocate a pseudo-tty
+    -t              : Allocate a pseudo-tty
     --sig-proxy=true: Proxy all received signals to the process (non-TTY mode only)
-    -i=false        : Keep STDIN open even if not attached
+    -i              : Keep STDIN open even if not attached
 
 If you do not specify `-a` then Docker will [attach all standard
 streams]( https://github.com/docker/docker/blob/75a7f4d90cde0295bcfb7213004abce8d4779b75/commands.go#L1797).
@@ -504,9 +504,10 @@ Or, to get the last time the container was (re)started;
     $ docker inspect -f "{{ .State.StartedAt }}" my-container
     # 2015-03-04T23:47:07.691840179Z
 
-You cannot set any restart policy in combination with
-["clean up (--rm)"](#clean-up-rm). Setting both `--restart` and `--rm`
-results in an error.
+
+Combining `--restart` (restart policy) with the `--rm` (clean up) flag results
+in an error. On container restart, attached clients are disconnected. See the
+examples on using the [`--rm` (clean up)](#clean-up-rm) flag later in this page.
 
 ### Examples
 
@@ -632,6 +633,8 @@ container:
 | `--blkio-weight-device=""` | Block IO weight (relative device weight, format: `DEVICE_NAME:WEIGHT`)                                                                          |
 | `--device-read-bps=""`     | Limit read rate from a device (format: `<device-path>:<number>[<unit>]`). Number is a positive integer. Unit can be one of `kb`, `mb`, or `gb`. |
 | `--device-write-bps=""`    | Limit write rate to a device (format: `<device-path>:<number>[<unit>]`). Number is a positive integer. Unit can be one of `kb`, `mb`, or `gb`.  |
+| `--device-read-iops="" `   | Limit read rate (IO per second) from a device (format: `<device-path>:<number>`). Number is a positive integer.                                 |
+| `--device-write-iops="" `  | Limit write rate (IO per second) to a device (format: `<device-path>:<number>`). Number is a positive integer.                                  |
 | `--oom-kill-disable=false` | Whether to disable OOM Killer for the container or not.                                                                                         |
 | `--memory-swappiness=""`   | Tune a container's memory swappiness behavior. Accepts an integer between 0 and 100.                                                            |
 | `--shm-size=""`            | Size of `/dev/shm`. The format is `<number><unit>`. `number` must be greater than `0`. Unit is optional and can be `b` (bytes), `k` (kilobytes), `m` (megabytes), or `g` (gigabytes). If you omit the unit, the system uses bytes. If you omit the size entirely, the system uses `64m`. |
@@ -983,21 +986,36 @@ on `/dev/sda` setting that weight to `200`:
         --blkio-weight-device "/dev/sda:200" \
         ubuntu
 
-The `--device-read-bps` flag limits the read rate from a device. For example,
-this command creates a container and limits the read rate to `1mb` per second
-from `/dev/sda`:
+The `--device-read-bps` flag limits the read rate (bytes per second) from a device.
+For example, this command creates a container and limits the read rate to `1mb`
+per second from `/dev/sda`:
 
     $ docker run -it --device-read-bps /dev/sda:1mb ubuntu
 
-The `--device-write-bps` flag limits the write rate to a device. For example,
-this command creates a container and limits the write rate to `1mb` per second
-for `/dev/sda`: 
+The `--device-write-bps` flag limits the write rate (bytes per second)to a device.
+For example, this command creates a container and limits the write rate to `1mb`
+per second for `/dev/sda`: 
 
     $ docker run -it --device-write-bps /dev/sda:1mb ubuntu
 
 Both flags take limits in the `<device-path>:<limit>[unit]` format. Both read
 and write rates must be a positive integer. You can specify the rate in `kb`
 (kilobytes), `mb` (megabytes), or `gb` (gigabytes).
+
+The `--device-read-iops` flag limits read rate (IO per second) from a device.
+For example, this command creates a container and limits the read rate to
+`1000` IO per second from `/dev/sda`:
+
+    $ docker run -ti --device-read-iops /dev/sda:1000 ubuntu
+
+The `--device-write-iops` flag limits write rate (IO per second) to a device.
+For example, this command creates a container and limits the write rate to
+`1000` IO per second to `/dev/sda`:
+
+    $ docker run -ti --device-write-iops /dev/sda:1000 ubuntu
+
+Both flags take limits in the `<device-path>:<limit>` format. Both read and
+write rates must be a positive integer.
 
 ## Additional groups
     --group-add: Add Linux capabilities
@@ -1221,7 +1239,7 @@ The following `run` command options work with container networking:
 
     --expose=[]: Expose a port or a range of ports inside the container.
                  These are additional to those exposed by the `EXPOSE` instruction
-    -P=false   : Publish all exposed ports to the host interfaces
+    -P         : Publish all exposed ports to the host interfaces
     -p=[]      : Publish a container᾿s port or a range of ports to the host
                    format: ip:hostPort:containerPort | ip::containerPort | hostPort:containerPort | containerPort
                    Both hostPort and containerPort can be specified as a

@@ -28,7 +28,7 @@ import (
 	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/docker/docker/pkg/tlsconfig"
+	"github.com/docker/go-connections/tlsconfig"
 )
 
 var (
@@ -96,7 +96,6 @@ func (p *Plugin) activateWithLock() error {
 		return err
 	}
 
-	logrus.Debugf("%s's manifest: %v", p.Name, m)
 	p.Manifest = m
 
 	for _, iface := range m.Implements {

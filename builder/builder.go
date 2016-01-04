@@ -10,21 +10,8 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/daemon"
-	"github.com/docker/docker/image"
-	"github.com/docker/docker/runconfig"
+	"github.com/docker/docker/api/types/container"
 )
-
-// Builder abstracts a Docker builder whose only purpose is to build a Docker image referenced by an imageID.
-type Builder interface {
-	// Build builds a Docker image referenced by an imageID string.
-	//
-	// Note: Tagging an image should not be done by a Builder, it should instead be done
-	// by the caller.
-	//
-	// TODO: make this return a reference instead of string
-	Build() (imageID string)
-}
 
 // Context represents a file system tree.
 type Context interface {
@@ -112,13 +99,13 @@ type Backend interface {
 	// TODO: use digest reference instead of name
 
 	// GetImage looks up a Docker image referenced by `name`.
-	GetImage(name string) (*image.Image, error)
+	GetImage(name string) (Image, error)
 	// Pull tells Docker to pull image referenced by `name`.
-	Pull(name string) (*image.Image, error)
-	// ContainerWsAttachWithLogs attaches to container.
-	ContainerWsAttachWithLogs(name string, cfg *daemon.ContainerWsAttachWithLogsConfig) error
+	Pull(name string) (Image, error)
+	// ContainerAttach attaches to container.
+	ContainerAttach(cID string, stdin io.ReadCloser, stdout, stderr io.Writer, stream bool) error
 	// ContainerCreate creates a new Docker container and returns potential warnings
-	ContainerCreate(params *daemon.ContainerCreateConfig) (types.ContainerCreateResponse, error)
+	ContainerCreate(types.ContainerCreateConfig) (types.ContainerCreateResponse, error)
 	// ContainerRm removes a container specified by `id`.
 	ContainerRm(name string, config *types.ContainerRmConfig) error
 	// Commit creates a new Docker image from an existing Docker container.
@@ -126,7 +113,7 @@ type Backend interface {
 	// Kill stops the container execution abruptly.
 	ContainerKill(containerID string, sig uint64) error
 	// Start starts a new container
-	ContainerStart(containerID string, hostConfig *runconfig.HostConfig) error
+	ContainerStart(containerID string, hostConfig *container.HostConfig) error
 	// ContainerWait stops processing until the given container is stopped.
 	ContainerWait(containerID string, timeout time.Duration) (int, error)
 
@@ -148,5 +135,5 @@ type Backend interface {
 type ImageCache interface {
 	// GetCachedImage returns a reference to a cached image whose parent equals `parent`
 	// and runconfig equals `cfg`. A cache miss is expected to return an empty ID and a nil error.
-	GetCachedImage(parentID string, cfg *runconfig.Config) (imageID string, err error)
+	GetCachedImage(parentID string, cfg *container.Config) (imageID string, err error)
 }

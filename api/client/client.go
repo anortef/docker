@@ -9,9 +9,9 @@ import (
 
 	"github.com/docker/docker/api/client/lib"
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/runconfig"
 )
 
 // apiClient is an interface that clients that talk with a docker server must implement.
@@ -19,10 +19,10 @@ type apiClient interface {
 	ClientVersion() string
 	ContainerAttach(options types.ContainerAttachOptions) (types.HijackedResponse, error)
 	ContainerCommit(options types.ContainerCommitOptions) (types.ContainerCommitResponse, error)
-	ContainerCreate(config *runconfig.ContainerConfigWrapper, containerName string) (types.ContainerCreateResponse, error)
+	ContainerCreate(config *container.Config, hostConfig *container.HostConfig, containerName string) (types.ContainerCreateResponse, error)
 	ContainerDiff(containerID string) ([]types.ContainerChange, error)
-	ContainerExecAttach(execID string, config runconfig.ExecConfig) (types.HijackedResponse, error)
-	ContainerExecCreate(config runconfig.ExecConfig) (types.ContainerExecCreateResponse, error)
+	ContainerExecAttach(execID string, config types.ExecConfig) (types.HijackedResponse, error)
+	ContainerExecCreate(config types.ExecConfig) (types.ContainerExecCreateResponse, error)
 	ContainerExecInspect(execID string) (types.ContainerExecInspect, error)
 	ContainerExecResize(options types.ResizeOptions) error
 	ContainerExecStart(execID string, config types.ExecStartCheck) error
@@ -43,6 +43,7 @@ type apiClient interface {
 	ContainerStop(containerID string, timeout int) error
 	ContainerTop(containerID string, arguments []string) (types.ContainerProcessList, error)
 	ContainerUnpause(containerID string) error
+	ContainerUpdate(containerID string, hostConfig container.HostConfig) error
 	ContainerWait(containerID string) (int, error)
 	CopyFromContainer(containerID, srcPath string) (io.ReadCloser, types.ContainerPathStat, error)
 	CopyToContainer(options types.CopyToContainerOptions) error
@@ -53,7 +54,7 @@ type apiClient interface {
 	ImageImport(options types.ImageImportOptions) (io.ReadCloser, error)
 	ImageInspectWithRaw(imageID string, getSize bool) (types.ImageInspect, []byte, error)
 	ImageList(options types.ImageListOptions) ([]types.Image, error)
-	ImageLoad(input io.Reader) (io.ReadCloser, error)
+	ImageLoad(input io.Reader) (types.ImageLoadResponse, error)
 	ImagePull(options types.ImagePullOptions, privilegeFunc lib.RequestPrivilegeFunc) (io.ReadCloser, error)
 	ImagePush(options types.ImagePushOptions, privilegeFunc lib.RequestPrivilegeFunc) (io.ReadCloser, error)
 	ImageRemove(options types.ImageRemoveOptions) ([]types.ImageDelete, error)
@@ -65,7 +66,7 @@ type apiClient interface {
 	NetworkCreate(options types.NetworkCreate) (types.NetworkCreateResponse, error)
 	NetworkDisconnect(networkID, containerID string) error
 	NetworkInspect(networkID string) (types.NetworkResource, error)
-	NetworkList() ([]types.NetworkResource, error)
+	NetworkList(options types.NetworkListOptions) ([]types.NetworkResource, error)
 	NetworkRemove(networkID string) error
 	RegistryLogin(auth types.AuthConfig) (types.AuthResponse, error)
 	ServerVersion() (types.Version, error)

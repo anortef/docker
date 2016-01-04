@@ -21,10 +21,10 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/builder/dockerfile/parser"
-	"github.com/docker/docker/daemon"
-	"github.com/docker/docker/image"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/httputils"
 	"github.com/docker/docker/pkg/ioutils"
@@ -32,14 +32,12 @@ import (
 	"github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/pkg/streamformatter"
 	"github.com/docker/docker/pkg/stringid"
-	"github.com/docker/docker/pkg/stringutils"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/pkg/tarsum"
 	"github.com/docker/docker/pkg/urlutil"
-	"github.com/docker/docker/runconfig"
 )
 
-func (b *Builder) commit(id string, autoCmd *stringutils.StrSlice, comment string) error {
+func (b *Builder) commit(id string, autoCmd *strslice.StrSlice, comment string) error {
 	if b.disableCommit {
 		return nil
 	}
@@ -50,11 +48,11 @@ func (b *Builder) commit(id string, autoCmd *stringutils.StrSlice, comment strin
 	if id == "" {
 		cmd := b.runConfig.Cmd
 		if runtime.GOOS != "windows" {
-			b.runConfig.Cmd = stringutils.NewStrSlice("/bin/sh", "-c", "#(nop) "+comment)
+			b.runConfig.Cmd = strslice.New("/bin/sh", "-c", "#(nop) "+comment)
 		} else {
-			b.runConfig.Cmd = stringutils.NewStrSlice("cmd", "/S /C", "REM (nop) "+comment)
+			b.runConfig.Cmd = strslice.New("cmd", "/S /C", "REM (nop) "+comment)
 		}
-		defer func(cmd *stringutils.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
+		defer func(cmd *strslice.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
 
 		hit, err := b.probeCache()
 		if err != nil {
@@ -173,11 +171,11 @@ func (b *Builder) runContextCommand(args []string, allowRemote bool, allowLocalD
 
 	cmd := b.runConfig.Cmd
 	if runtime.GOOS != "windows" {
-		b.runConfig.Cmd = stringutils.NewStrSlice("/bin/sh", "-c", fmt.Sprintf("#(nop) %s %s in %s", cmdName, srcHash, dest))
+		b.runConfig.Cmd = strslice.New("/bin/sh", "-c", fmt.Sprintf("#(nop) %s %s in %s", cmdName, srcHash, dest))
 	} else {
-		b.runConfig.Cmd = stringutils.NewStrSlice("cmd", "/S", "/C", fmt.Sprintf("REM (nop) %s %s in %s", cmdName, srcHash, dest))
+		b.runConfig.Cmd = strslice.New("cmd", "/S", "/C", fmt.Sprintf("REM (nop) %s %s in %s", cmdName, srcHash, dest))
 	}
-	defer func(cmd *stringutils.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
+	defer func(cmd *strslice.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
 
 	if hit, err := b.probeCache(); err != nil {
 		return err
@@ -185,7 +183,7 @@ func (b *Builder) runContextCommand(args []string, allowRemote bool, allowLocalD
 		return nil
 	}
 
-	container, err := b.docker.ContainerCreate(&daemon.ContainerCreateConfig{Config: b.runConfig})
+	container, err := b.docker.ContainerCreate(types.ContainerCreateConfig{Config: b.runConfig})
 	if err != nil {
 		return err
 	}
@@ -395,11 +393,11 @@ func containsWildcards(name string) bool {
 	return false
 }
 
-func (b *Builder) processImageFrom(img *image.Image) error {
-	b.image = img.ID().String()
+func (b *Builder) processImageFrom(img builder.Image) error {
+	b.image = img.ID()
 
 	if img.Config != nil {
-		b.runConfig = img.Config
+		b.runConfig = img.Config()
 	}
 
 	// The default path will be blank on Windows (set by HCS)
@@ -478,7 +476,7 @@ func (b *Builder) create() (string, error) {
 	}
 	b.runConfig.Image = b.image
 
-	resources := runconfig.Resources{
+	resources := container.Resources{
 		CgroupParent: b.CgroupParent,
 		CPUShares:    b.CPUShares,
 		CPUPeriod:    b.CPUPeriod,
@@ -491,7 +489,7 @@ func (b *Builder) create() (string, error) {
 	}
 
 	// TODO: why not embed a hostconfig in builder?
-	hostConfig := &runconfig.HostConfig{
+	hostConfig := &container.HostConfig{
 		Isolation: b.Isolation,
 		ShmSize:   b.ShmSize,
 		Resources: resources,
@@ -500,7 +498,7 @@ func (b *Builder) create() (string, error) {
 	config := *b.runConfig
 
 	// Create the container
-	c, err := b.docker.ContainerCreate(&daemon.ContainerCreateConfig{
+	c, err := b.docker.ContainerCreate(types.ContainerCreateConfig{
 		Config:     b.runConfig,
 		HostConfig: hostConfig,
 	})
@@ -526,15 +524,9 @@ func (b *Builder) create() (string, error) {
 
 func (b *Builder) run(cID string) (err error) {
 	errCh := make(chan error)
-	if b.Verbose {
-		go func() {
-			errCh <- b.docker.ContainerWsAttachWithLogs(cID, &daemon.ContainerWsAttachWithLogsConfig{
-				OutStream: b.Stdout,
-				ErrStream: b.Stderr,
-				Stream:    true,
-			})
-		}()
-	}
+	go func() {
+		errCh <- b.docker.ContainerAttach(cID, nil, b.Stdout, b.Stderr, true)
+	}()
 
 	finished := make(chan struct{})
 	defer close(finished)
@@ -552,11 +544,9 @@ func (b *Builder) run(cID string) (err error) {
 		return err
 	}
 
-	if b.Verbose {
-		// Block on reading output from container, stop on err or chan closed
-		if err := <-errCh; err != nil {
-			return err
-		}
+	// Block on reading output from container, stop on err or chan closed
+	if err := <-errCh; err != nil {
+		return err
 	}
 
 	if ret, _ := b.docker.ContainerWait(cID, -1); ret != 0 {

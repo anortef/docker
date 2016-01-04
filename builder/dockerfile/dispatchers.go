@@ -9,7 +9,6 @@ package dockerfile
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,20 +17,15 @@ import (
 	"strings"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/docker/api"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/strslice"
+	"github.com/docker/docker/builder"
 	derr "github.com/docker/docker/errors"
-	"github.com/docker/docker/image"
-	flag "github.com/docker/docker/pkg/mflag"
-	"github.com/docker/docker/pkg/nat"
 	"github.com/docker/docker/pkg/signal"
-	"github.com/docker/docker/pkg/stringutils"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/runconfig"
-)
-
-const (
-	// NoBaseImageSpecifier is the symbol used by the FROM
-	// command to specify that no base image is to be used.
-	NoBaseImageSpecifier string = "scratch"
+	"github.com/docker/go-connections/nat"
 )
 
 // dispatch with no layer / parsing. This is effectively not a command.
@@ -200,7 +194,7 @@ func from(b *Builder, args []string, attributes map[string]bool, original string
 	name := args[0]
 
 	// Windows cannot support a container with no base image.
-	if name == NoBaseImageSpecifier {
+	if name == api.NoBaseImageSpecifier {
 		if runtime.GOOS == "windows" {
 			return fmt.Errorf("Windows does not support FROM scratch")
 		}
@@ -210,7 +204,7 @@ func from(b *Builder, args []string, attributes map[string]bool, original string
 	}
 
 	var (
-		image *image.Image
+		image builder.Image
 		err   error
 	)
 	// TODO: don't use `name`, instead resolve it to a digest
@@ -315,13 +309,9 @@ func run(b *Builder, args []string, attributes map[string]bool, original string)
 		}
 	}
 
-	runCmd := flag.NewFlagSet("run", flag.ContinueOnError)
-	runCmd.SetOutput(ioutil.Discard)
-	runCmd.Usage = nil
-
-	config, _, _, err := runconfig.Parse(runCmd, append([]string{b.image}, args...))
-	if err != nil {
-		return err
+	config := &container.Config{
+		Cmd:   strslice.New(args...),
+		Image: b.image,
 	}
 
 	// stash the cmd
@@ -330,7 +320,7 @@ func run(b *Builder, args []string, attributes map[string]bool, original string)
 	// stash the config environment
 	env := b.runConfig.Env
 
-	defer func(cmd *stringutils.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
+	defer func(cmd *strslice.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
 	defer func(env []string) { b.runConfig.Env = env }(env)
 
 	// derive the net build-time environment for this run. We let config
@@ -373,7 +363,7 @@ func run(b *Builder, args []string, attributes map[string]bool, original string)
 	if len(cmdBuildEnv) > 0 {
 		sort.Strings(cmdBuildEnv)
 		tmpEnv := append([]string{fmt.Sprintf("|%d", len(cmdBuildEnv))}, cmdBuildEnv...)
-		saveCmd = stringutils.NewStrSlice(append(tmpEnv, saveCmd.Slice()...)...)
+		saveCmd = strslice.New(append(tmpEnv, saveCmd.Slice()...)...)
 	}
 
 	b.runConfig.Cmd = saveCmd
@@ -431,7 +421,7 @@ func cmd(b *Builder, args []string, attributes map[string]bool, original string)
 		}
 	}
 
-	b.runConfig.Cmd = stringutils.NewStrSlice(cmdSlice...)
+	b.runConfig.Cmd = strslice.New(cmdSlice...)
 
 	if err := b.commit("", b.runConfig.Cmd, fmt.Sprintf("CMD %q", cmdSlice)); err != nil {
 		return err
@@ -462,16 +452,16 @@ func entrypoint(b *Builder, args []string, attributes map[string]bool, original 
 	switch {
 	case attributes["json"]:
 		// ENTRYPOINT ["echo", "hi"]
-		b.runConfig.Entrypoint = stringutils.NewStrSlice(parsed...)
+		b.runConfig.Entrypoint = strslice.New(parsed...)
 	case len(parsed) == 0:
 		// ENTRYPOINT []
 		b.runConfig.Entrypoint = nil
 	default:
 		// ENTRYPOINT echo hi
 		if runtime.GOOS != "windows" {
-			b.runConfig.Entrypoint = stringutils.NewStrSlice("/bin/sh", "-c", parsed[0])
+			b.runConfig.Entrypoint = strslice.New("/bin/sh", "-c", parsed[0])
 		} else {
-			b.runConfig.Entrypoint = stringutils.NewStrSlice("cmd", "/S", "/C", parsed[0])
+			b.runConfig.Entrypoint = strslice.New("cmd", "/S", "/C", parsed[0])
 		}
 	}
 

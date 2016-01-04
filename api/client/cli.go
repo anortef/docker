@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"runtime"
 
@@ -14,7 +15,7 @@ import (
 	"github.com/docker/docker/dockerversion"
 	"github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/term"
-	"github.com/docker/docker/pkg/tlsconfig"
+	"github.com/docker/go-connections/tlsconfig"
 )
 
 // DockerCli represents the docker command line client.
@@ -67,9 +68,15 @@ func (cli *DockerCli) CheckTtyInput(attachStdin, ttyMode bool) error {
 }
 
 // PsFormat returns the format string specified in the configuration.
-// String contains columns and format specification, for example {{ID}\t{{Name}}.
+// String contains columns and format specification, for example {{ID}}\t{{Name}}.
 func (cli *DockerCli) PsFormat() string {
 	return cli.configFile.PsFormat
+}
+
+// ImagesFormat returns the format string specified in the configuration.
+// String contains columns and format specification, for example {{ID}}\t{{Name}}.
+func (cli *DockerCli) ImagesFormat() string {
+	return cli.configFile.ImagesFormat
 }
 
 // NewDockerCli returns a DockerCli instance with IO output and error streams set by in, out and err.
@@ -103,12 +110,17 @@ func NewDockerCli(in io.ReadCloser, out, err io.Writer, clientFlags *cli.ClientF
 		}
 		customHeaders["User-Agent"] = "Docker-Client/" + dockerversion.Version + " (" + runtime.GOOS + ")"
 
-		verStr := string(api.DefaultVersion)
+		verStr := api.DefaultVersion.String()
 		if tmpStr := os.Getenv("DOCKER_API_VERSION"); tmpStr != "" {
 			verStr = tmpStr
 		}
 
-		client, err := lib.NewClient(host, verStr, clientFlags.Common.TLSOptions, customHeaders)
+		clientTransport, err := newClientTransport(clientFlags.Common.TLSOptions)
+		if err != nil {
+			return err
+		}
+
+		client, err := lib.NewClient(host, verStr, clientTransport, customHeaders)
 		if err != nil {
 			return err
 		}
@@ -144,4 +156,18 @@ func getServerHost(hosts []string, tlsOptions *tlsconfig.Options) (host string, 
 
 	host, err = opts.ParseHost(defaultHost, host)
 	return
+}
+
+func newClientTransport(tlsOptions *tlsconfig.Options) (*http.Transport, error) {
+	if tlsOptions == nil {
+		return &http.Transport{}, nil
+	}
+
+	config, err := tlsconfig.Client(*tlsOptions)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Transport{
+		TLSClientConfig: config,
+	}, nil
 }

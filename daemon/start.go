@@ -4,13 +4,14 @@ import (
 	"runtime"
 
 	"github.com/Sirupsen/logrus"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
 	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/runconfig"
 )
 
 // ContainerStart starts a container.
-func (daemon *Daemon) ContainerStart(name string, hostConfig *runconfig.HostConfig) error {
+func (daemon *Daemon) ContainerStart(name string, hostConfig *containertypes.HostConfig) error {
 	container, err := daemon.GetContainer(name)
 	if err != nil {
 		return err
@@ -30,7 +31,7 @@ func (daemon *Daemon) ContainerStart(name string, hostConfig *runconfig.HostConf
 		// creating a container, not during start.
 		if hostConfig != nil {
 			logrus.Warn("DEPRECATED: Setting host configuration options when the container starts is deprecated and will be removed in Docker 1.12")
-			if err := daemon.adaptContainerSettings(hostConfig, false); err != nil {
+			if err := daemon.setSecurityOptions(container, hostConfig); err != nil {
 				return err
 			}
 			if err := daemon.setHostConfig(container, hostConfig); err != nil {
@@ -47,6 +48,11 @@ func (daemon *Daemon) ContainerStart(name string, hostConfig *runconfig.HostConf
 	// check if hostConfig is in line with the current system settings.
 	// It may happen cgroups are umounted or the like.
 	if _, err = daemon.verifyContainerSettings(container.HostConfig, nil); err != nil {
+		return err
+	}
+	// Adapt for old containers in case we have updates in this function and
+	// old containers never have chance to call the new function in create stage.
+	if err := daemon.adaptContainerSettings(container.HostConfig, false); err != nil {
 		return err
 	}
 

@@ -4,11 +4,11 @@ import (
 	"os"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/pkg/nat"
 	"github.com/docker/docker/pkg/version"
-	"github.com/docker/docker/runconfig"
+	"github.com/docker/go-connections/nat"
 )
 
 // ContainerCreateResponse contains the information returned to a client on the
@@ -26,6 +26,13 @@ type ContainerCreateResponse struct {
 type ContainerExecCreateResponse struct {
 	// ID is the exec ID.
 	ID string `json:"Id"`
+}
+
+// ContainerUpdateResponse contains response of Remote API:
+// POST /containers/{name:.*}/update
+type ContainerUpdateResponse struct {
+	// Warnings are any warnings encountered during the updating of the container.
+	Warnings []string `json:"Warnings"`
 }
 
 // AuthResponse contains response of Remote API:
@@ -103,10 +110,10 @@ type ImageInspect struct {
 	Comment         string
 	Created         string
 	Container       string
-	ContainerConfig *runconfig.Config
+	ContainerConfig *container.Config
 	DockerVersion   string
 	Author          string
-	Config          *runconfig.Config
+	Config          *container.Config
 	Architecture    string
 	Os              string
 	Size            int64
@@ -236,6 +243,8 @@ type PluginsInfo struct {
 	Volume []string
 	// List of Network plugins registered
 	Network []string
+	// List of Authorization plugins registered
+	Authorization []string
 }
 
 // ExecStartCheck is a temp struct used by execStart
@@ -283,7 +292,7 @@ type ContainerJSONBase struct {
 	ProcessLabel    string
 	AppArmorProfile string
 	ExecIDs         []string
-	HostConfig      *runconfig.HostConfig
+	HostConfig      *container.HostConfig
 	GraphDriver     GraphDriverData
 	SizeRw          *int64 `json:",omitempty"`
 	SizeRootFs      *int64 `json:",omitempty"`
@@ -293,7 +302,7 @@ type ContainerJSONBase struct {
 type ContainerJSON struct {
 	*ContainerJSONBase
 	Mounts          []MountPoint
-	Config          *runconfig.Config
+	Config          *container.Config
 	NetworkSettings *NetworkSettings
 }
 

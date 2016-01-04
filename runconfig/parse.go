@@ -6,14 +6,15 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/opts"
 	flag "github.com/docker/docker/pkg/mflag"
 	"github.com/docker/docker/pkg/mount"
-	"github.com/docker/docker/pkg/nat"
-	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/signal"
-	"github.com/docker/docker/pkg/stringutils"
+	runconfigopts "github.com/docker/docker/runconfig/opts"
 	"github.com/docker/docker/volume"
+	"github.com/docker/go-connections/nat"
 	"github.com/docker/go-units"
 )
 
@@ -47,21 +48,23 @@ var (
 // Parse parses the specified args for the specified command and generates a Config,
 // a HostConfig and returns them with the specified command.
 // If the specified args are not valid, it will return an error.
-func Parse(cmd *flag.FlagSet, args []string) (*Config, *HostConfig, *flag.FlagSet, error) {
+func Parse(cmd *flag.FlagSet, args []string) (*container.Config, *container.HostConfig, *flag.FlagSet, error) {
 	var (
 		// FIXME: use utils.ListOpts for attach and volumes?
 		flAttach            = opts.NewListOpts(opts.ValidateAttach)
 		flVolumes           = opts.NewListOpts(nil)
 		flTmpfs             = opts.NewListOpts(nil)
-		flBlkioWeightDevice = opts.NewWeightdeviceOpt(opts.ValidateWeightDevice)
-		flDeviceReadBps     = opts.NewThrottledeviceOpt(opts.ValidateThrottleBpsDevice)
-		flDeviceWriteBps    = opts.NewThrottledeviceOpt(opts.ValidateThrottleBpsDevice)
+		flBlkioWeightDevice = runconfigopts.NewWeightdeviceOpt(runconfigopts.ValidateWeightDevice)
+		flDeviceReadBps     = runconfigopts.NewThrottledeviceOpt(runconfigopts.ValidateThrottleBpsDevice)
+		flDeviceWriteBps    = runconfigopts.NewThrottledeviceOpt(runconfigopts.ValidateThrottleBpsDevice)
 		flLinks             = opts.NewListOpts(ValidateLink)
+		flDeviceReadIOps    = runconfigopts.NewThrottledeviceOpt(runconfigopts.ValidateThrottleIOpsDevice)
+		flDeviceWriteIOps   = runconfigopts.NewThrottledeviceOpt(runconfigopts.ValidateThrottleIOpsDevice)
 		flEnv               = opts.NewListOpts(opts.ValidateEnv)
 		flLabels            = opts.NewListOpts(opts.ValidateEnv)
 		flDevices           = opts.NewListOpts(ValidateDevice)
 
-		flUlimits = opts.NewUlimitOpt(nil)
+		flUlimits = runconfigopts.NewUlimitOpt(nil)
 
 		flPublish           = opts.NewListOpts(nil)
 		flExpose            = opts.NewListOpts(nil)
@@ -90,7 +93,7 @@ func Parse(cmd *flag.FlagSet, args []string) (*Config, *HostConfig, *flag.FlagSe
 		flHostname          = cmd.String([]string{"h", "-hostname"}, "", "Container host name")
 		flMemoryString      = cmd.String([]string{"m", "-memory"}, "", "Memory limit")
 		flMemoryReservation = cmd.String([]string{"-memory-reservation"}, "", "Memory soft limit")
-		flMemorySwap        = cmd.String([]string{"-memory-swap"}, "", "Total memory (memory + swap), '-1' to disable swap")
+		flMemorySwap        = cmd.String([]string{"-memory-swap"}, "", "Swap limit equal to memory plus swap: '-1' to enable unlimited swap")
 		flKernelMemory      = cmd.String([]string{"-kernel-memory"}, "", "Kernel memory limit")
 		flUser              = cmd.String([]string{"u", "-user"}, "", "Username or UID (format: <name|uid>[:<group|gid>])")
 		flWorkingDir        = cmd.String([]string{"w", "-workdir"}, "", "Working directory inside the container")
@@ -101,7 +104,7 @@ func Parse(cmd *flag.FlagSet, args []string) (*Config, *HostConfig, *flag.FlagSe
 		flCpusetMems        = cmd.String([]string{"-cpuset-mems"}, "", "MEMs in which to allow execution (0-3, 0,1)")
 		flBlkioWeight       = cmd.Uint16([]string{"-blkio-weight"}, 0, "Block IO (relative weight), between 10 and 1000")
 		flSwappiness        = cmd.Int64([]string{"-memory-swappiness"}, -1, "Tune container memory swappiness (0 to 100)")
-		flNetMode           = cmd.String([]string{"-net"}, "default", "Set the Network for the container")
+		flNetMode           = cmd.String([]string{"-net"}, "default", "Connect a container to a network")
 		flMacAddress        = cmd.String([]string{"-mac-address"}, "", "Container MAC address (e.g. 92:d0:c6:0a:29:33)")
 		flIpcMode           = cmd.String([]string{"-ipc"}, "", "IPC namespace to use")
 		flRestartPolicy     = cmd.String([]string{"-restart"}, "no", "Restart policy to apply when a container exits")
@@ -118,6 +121,8 @@ func Parse(cmd *flag.FlagSet, args []string) (*Config, *HostConfig, *flag.FlagSe
 	cmd.Var(&flBlkioWeightDevice, []string{"-blkio-weight-device"}, "Block IO weight (relative device weight)")
 	cmd.Var(&flDeviceReadBps, []string{"-device-read-bps"}, "Limit read rate (bytes per second) from a device")
 	cmd.Var(&flDeviceWriteBps, []string{"-device-write-bps"}, "Limit write rate (bytes per second) to a device")
+	cmd.Var(&flDeviceReadIOps, []string{"-device-read-iops"}, "Limit read rate (IO per second) from a device")
+	cmd.Var(&flDeviceWriteIOps, []string{"-device-write-iops"}, "Limit write rate (IO per second) to a device")
 	cmd.Var(&flVolumes, []string{"v", "-volume"}, "Bind mount a volume")
 	cmd.Var(&flTmpfs, []string{"-tmpfs"}, "Mount a tmpfs directory")
 	cmd.Var(&flLinks, []string{"-link"}, "Add link to another container")
@@ -245,15 +250,15 @@ func Parse(cmd *flag.FlagSet, args []string) (*Config, *HostConfig, *flag.FlagSe
 
 	var (
 		parsedArgs = cmd.Args()
-		runCmd     *stringutils.StrSlice
-		entrypoint *stringutils.StrSlice
+		runCmd     *strslice.StrSlice
+		entrypoint *strslice.StrSlice
 		image      = cmd.Arg(0)
 	)
 	if len(parsedArgs) > 1 {
-		runCmd = stringutils.NewStrSlice(parsedArgs[1:]...)
+		runCmd = strslice.New(parsedArgs[1:]...)
 	}
 	if *flEntrypoint != "" {
-		entrypoint = stringutils.NewStrSlice(*flEntrypoint)
+		entrypoint = strslice.New(*flEntrypoint)
 	}
 
 	var (
@@ -280,7 +285,7 @@ func Parse(cmd *flag.FlagSet, args []string) (*Config, *HostConfig, *flag.FlagSe
 		proto, port := nat.SplitProtoPort(e)
 		//parse the start and end port and create a sequence of ports to expose
 		//if expose a port, the start and end port are the same
-		start, end, err := parsers.ParsePortRange(port)
+		start, end, err := nat.ParsePortRange(port)
 		if err != nil {
 			return nil, nil, cmd, fmt.Errorf("Invalid range format for --expose: %s, error: %s", e, err)
 		}
@@ -296,7 +301,7 @@ func Parse(cmd *flag.FlagSet, args []string) (*Config, *HostConfig, *flag.FlagSe
 	}
 
 	// parse device mappings
-	deviceMappings := []DeviceMapping{}
+	deviceMappings := []container.DeviceMapping{}
 	for _, device := range flDevices.GetAll() {
 		deviceMapping, err := ParseDevice(device)
 		if err != nil {
@@ -317,17 +322,17 @@ func Parse(cmd *flag.FlagSet, args []string) (*Config, *HostConfig, *flag.FlagSe
 		return nil, nil, cmd, err
 	}
 
-	ipcMode := IpcMode(*flIpcMode)
+	ipcMode := container.IpcMode(*flIpcMode)
 	if !ipcMode.Valid() {
 		return nil, nil, cmd, fmt.Errorf("--ipc: invalid IPC mode")
 	}
 
-	pidMode := PidMode(*flPidMode)
+	pidMode := container.PidMode(*flPidMode)
 	if !pidMode.Valid() {
 		return nil, nil, cmd, fmt.Errorf("--pid: invalid PID mode")
 	}
 
-	utsMode := UTSMode(*flUTSMode)
+	utsMode := container.UTSMode(*flUTSMode)
 	if !utsMode.Valid() {
 		return nil, nil, cmd, fmt.Errorf("--uts: invalid UTS mode")
 	}
@@ -342,27 +347,30 @@ func Parse(cmd *flag.FlagSet, args []string) (*Config, *HostConfig, *flag.FlagSe
 		return nil, nil, cmd, err
 	}
 
-	resources := Resources{
-		CgroupParent:        *flCgroupParent,
-		Memory:              flMemory,
-		MemoryReservation:   MemoryReservation,
-		MemorySwap:          memorySwap,
-		MemorySwappiness:    flSwappiness,
-		KernelMemory:        KernelMemory,
-		CPUShares:           *flCPUShares,
-		CPUPeriod:           *flCPUPeriod,
-		CpusetCpus:          *flCpusetCpus,
-		CpusetMems:          *flCpusetMems,
-		CPUQuota:            *flCPUQuota,
-		BlkioWeight:         *flBlkioWeight,
-		BlkioWeightDevice:   flBlkioWeightDevice.GetList(),
-		BlkioDeviceReadBps:  flDeviceReadBps.GetList(),
-		BlkioDeviceWriteBps: flDeviceWriteBps.GetList(),
-		Ulimits:             flUlimits.GetList(),
-		Devices:             deviceMappings,
+	resources := container.Resources{
+		CgroupParent:         *flCgroupParent,
+		Memory:               flMemory,
+		MemoryReservation:    MemoryReservation,
+		MemorySwap:           memorySwap,
+		MemorySwappiness:     flSwappiness,
+		KernelMemory:         KernelMemory,
+		OomKillDisable:       *flOomKillDisable,
+		CPUShares:            *flCPUShares,
+		CPUPeriod:            *flCPUPeriod,
+		CpusetCpus:           *flCpusetCpus,
+		CpusetMems:           *flCpusetMems,
+		CPUQuota:             *flCPUQuota,
+		BlkioWeight:          *flBlkioWeight,
+		BlkioWeightDevice:    flBlkioWeightDevice.GetList(),
+		BlkioDeviceReadBps:   flDeviceReadBps.GetList(),
+		BlkioDeviceWriteBps:  flDeviceWriteBps.GetList(),
+		BlkioDeviceReadIOps:  flDeviceReadIOps.GetList(),
+		BlkioDeviceWriteIOps: flDeviceWriteIOps.GetList(),
+		Ulimits:              flUlimits.GetList(),
+		Devices:              deviceMappings,
 	}
 
-	config := &Config{
+	config := &container.Config{
 		Hostname:     hostname,
 		Domainname:   domainname,
 		ExposedPorts: ports,
@@ -387,11 +395,10 @@ func Parse(cmd *flag.FlagSet, args []string) (*Config, *HostConfig, *flag.FlagSe
 		StopSignal:      *flStopSignal,
 	}
 
-	hostConfig := &HostConfig{
+	hostConfig := &container.HostConfig{
 		Binds:           binds,
 		ContainerIDFile: *flContainerIDFile,
 		OomScoreAdj:     *flOomScoreAdj,
-		OomKillDisable:  *flOomKillDisable,
 		Privileged:      *flPrivileged,
 		PortBindings:    portBindings,
 		Links:           flLinks.GetAll(),
@@ -406,19 +413,19 @@ func Parse(cmd *flag.FlagSet, args []string) (*Config, *HostConfig, *flag.FlagSe
 		DNSOptions:     flDNSOptions.GetAllOrEmpty(),
 		ExtraHosts:     flExtraHosts.GetAll(),
 		VolumesFrom:    flVolumesFrom.GetAll(),
-		NetworkMode:    NetworkMode(*flNetMode),
+		NetworkMode:    container.NetworkMode(*flNetMode),
 		IpcMode:        ipcMode,
 		PidMode:        pidMode,
 		UTSMode:        utsMode,
-		CapAdd:         stringutils.NewStrSlice(flCapAdd.GetAll()...),
-		CapDrop:        stringutils.NewStrSlice(flCapDrop.GetAll()...),
+		CapAdd:         strslice.New(flCapAdd.GetAll()...),
+		CapDrop:        strslice.New(flCapDrop.GetAll()...),
 		GroupAdd:       flGroupAdd.GetAll(),
 		RestartPolicy:  restartPolicy,
 		SecurityOpt:    flSecurityOpt.GetAll(),
 		ReadonlyRootfs: *flReadonlyRootfs,
-		LogConfig:      LogConfig{Type: *flLoggingDriver, Config: loggingOpts},
+		LogConfig:      container.LogConfig{Type: *flLoggingDriver, Config: loggingOpts},
 		VolumeDriver:   *flVolumeDriver,
-		Isolation:      IsolationLevel(*flIsolation),
+		Isolation:      container.IsolationLevel(*flIsolation),
 		ShmSize:        parsedShm,
 		Resources:      resources,
 		Tmpfs:          tmpfs,
@@ -471,8 +478,8 @@ func parseLoggingOpts(loggingDriver string, loggingOpts []string) (map[string]st
 }
 
 // ParseRestartPolicy returns the parsed policy or an error indicating what is incorrect
-func ParseRestartPolicy(policy string) (RestartPolicy, error) {
-	p := RestartPolicy{}
+func ParseRestartPolicy(policy string) (container.RestartPolicy, error) {
+	p := container.RestartPolicy{}
 
 	if policy == "" {
 		return p, nil
@@ -510,20 +517,8 @@ func ParseRestartPolicy(policy string) (RestartPolicy, error) {
 	return p, nil
 }
 
-func parseKeyValueOpts(opts opts.ListOpts) ([]KeyValuePair, error) {
-	out := make([]KeyValuePair, opts.Len())
-	for i, o := range opts.GetAll() {
-		k, v, err := parsers.ParseKeyValueOpt(o)
-		if err != nil {
-			return nil, err
-		}
-		out[i] = KeyValuePair{Key: k, Value: v}
-	}
-	return out, nil
-}
-
-// ParseDevice parses a device mapping string to a DeviceMapping struct
-func ParseDevice(device string) (DeviceMapping, error) {
+// ParseDevice parses a device mapping string to a container.DeviceMapping struct
+func ParseDevice(device string) (container.DeviceMapping, error) {
 	src := ""
 	dst := ""
 	permissions := "rwm"
@@ -542,14 +537,14 @@ func ParseDevice(device string) (DeviceMapping, error) {
 	case 1:
 		src = arr[0]
 	default:
-		return DeviceMapping{}, fmt.Errorf("Invalid device specification: %s", device)
+		return container.DeviceMapping{}, fmt.Errorf("Invalid device specification: %s", device)
 	}
 
 	if dst == "" {
 		dst = src
 	}
 
-	deviceMapping := DeviceMapping{
+	deviceMapping := container.DeviceMapping{
 		PathOnHost:        src,
 		PathInContainer:   dst,
 		CgroupPermissions: permissions,

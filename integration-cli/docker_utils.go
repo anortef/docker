@@ -27,9 +27,9 @@ import (
 	"github.com/docker/docker/pkg/httputils"
 	"github.com/docker/docker/pkg/integration"
 	"github.com/docker/docker/pkg/ioutils"
-	"github.com/docker/docker/pkg/sockets"
 	"github.com/docker/docker/pkg/stringutils"
-	"github.com/docker/docker/pkg/tlsconfig"
+	"github.com/docker/go-connections/sockets"
+	"github.com/docker/go-connections/tlsconfig"
 	"github.com/go-check/check"
 )
 
@@ -321,11 +321,11 @@ func (d *Daemon) StartWithBusybox(arg ...string) error {
 		}
 	}
 	// loading busybox image to this daemon
-	if _, err := d.Cmd("load", "--input", bb); err != nil {
-		return fmt.Errorf("could not load busybox image: %v", err)
+	if out, err := d.Cmd("load", "--input", bb); err != nil {
+		return fmt.Errorf("could not load busybox image: %s", out)
 	}
 	if err := os.Remove(bb); err != nil {
-		d.c.Logf("Could not remove %s: %v", bb, err)
+		d.c.Logf("could not remove %s: %v", bb, err)
 	}
 	return nil
 }
@@ -1306,6 +1306,47 @@ func buildImageFromContextWithOut(name string, ctx *FakeContext, useCache bool, 
 		return "", "", err
 	}
 	return id, out, nil
+}
+
+func buildImageFromContextWithStdoutStderr(name string, ctx *FakeContext, useCache bool, buildFlags ...string) (string, string, string, error) {
+	args := []string{"build", "-t", name}
+	if !useCache {
+		args = append(args, "--no-cache")
+	}
+	args = append(args, buildFlags...)
+	args = append(args, ".")
+	buildCmd := exec.Command(dockerBinary, args...)
+	buildCmd.Dir = ctx.Dir
+
+	stdout, stderr, exitCode, err := runCommandWithStdoutStderr(buildCmd)
+	if err != nil || exitCode != 0 {
+		return "", stdout, stderr, fmt.Errorf("failed to build the image: %s", stdout)
+	}
+	id, err := getIDByName(name)
+	if err != nil {
+		return "", stdout, stderr, err
+	}
+	return id, stdout, stderr, nil
+}
+
+func buildImageFromGitWithStdoutStderr(name string, ctx *fakeGit, useCache bool, buildFlags ...string) (string, string, string, error) {
+	args := []string{"build", "-t", name}
+	if !useCache {
+		args = append(args, "--no-cache")
+	}
+	args = append(args, buildFlags...)
+	args = append(args, ctx.RepoURL)
+	buildCmd := exec.Command(dockerBinary, args...)
+
+	stdout, stderr, exitCode, err := runCommandWithStdoutStderr(buildCmd)
+	if err != nil || exitCode != 0 {
+		return "", stdout, stderr, fmt.Errorf("failed to build the image: %s", stdout)
+	}
+	id, err := getIDByName(name)
+	if err != nil {
+		return "", stdout, stderr, err
+	}
+	return id, stdout, stderr, nil
 }
 
 func buildImageFromPath(name, path string, useCache bool, buildFlags ...string) (string, error) {
