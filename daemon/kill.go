@@ -8,11 +8,26 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/container"
-	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/pkg/signal"
 )
 
-// ContainerKill send signal to the container
+type errNoSuchProcess struct {
+	pid    int
+	signal int
+}
+
+func (e errNoSuchProcess) Error() string {
+	return fmt.Sprintf("Cannot kill process (pid=%d) with signal %d: no such process.", e.pid, e.signal)
+}
+
+// isErrNoSuchProcess returns true if the error
+// is an instance of errNoSuchProcess.
+func isErrNoSuchProcess(err error) bool {
+	_, ok := err.(errNoSuchProcess)
+	return ok
+}
+
+// ContainerKill sends signal to the container
 // If no signal is given (sig 0), then Kill with SIGKILL and wait
 // for the container to exit.
 // If a signal is given, then just send it to the container and return.
@@ -45,14 +60,18 @@ func (daemon *Daemon) killWithSignal(container *container.Container, sig int) er
 
 	// We could unpause the container for them rather than returning this error
 	if container.Paused {
-		return derr.ErrorCodeUnpauseContainer.WithArgs(container.ID)
+		return fmt.Errorf("Container %s is paused. Unpause the container before stopping", container.ID)
 	}
 
 	if !container.Running {
-		return derr.ErrorCodeNotRunning.WithArgs(container.ID)
+		return errNotRunning{container.ID}
 	}
 
 	container.ExitOnNext()
+
+	if !daemon.IsShuttingDown() {
+		container.HasBeenManuallyStopped = true
+	}
 
 	// if the container is currently restarting we do not need to send the signal
 	// to the process.  Telling the monitor that it should exit on it's next event
@@ -62,17 +81,20 @@ func (daemon *Daemon) killWithSignal(container *container.Container, sig int) er
 	}
 
 	if err := daemon.kill(container, sig); err != nil {
-		return err
+		return fmt.Errorf("Cannot kill container %s: %s", container.ID, err)
 	}
 
-	daemon.LogContainerEvent(container, "kill")
+	attributes := map[string]string{
+		"signal": fmt.Sprintf("%d", sig),
+	}
+	daemon.LogContainerEventWithAttributes(container, "kill", attributes)
 	return nil
 }
 
 // Kill forcefully terminates a container.
 func (daemon *Daemon) Kill(container *container.Container) error {
 	if !container.IsRunning() {
-		return derr.ErrorCodeNotRunning.WithArgs(container.ID)
+		return errNotRunning{container.ID}
 	}
 
 	// 1. Send SIGKILL
@@ -87,6 +109,9 @@ func (daemon *Daemon) Kill(container *container.Container) error {
 		// So, instead we'll give it up to 2 more seconds to complete and if
 		// by that time the container is still running, then the error
 		// we got is probably valid and so we return it to the caller.
+		if isErrNoSuchProcess(err) {
+			return nil
+		}
 
 		if container.IsRunning() {
 			container.WaitStop(2 * time.Second)
@@ -98,6 +123,9 @@ func (daemon *Daemon) Kill(container *container.Container) error {
 
 	// 2. Wait for the process to die, in last resort, try to kill the process directly
 	if err := killProcessDirectly(container); err != nil {
+		if isErrNoSuchProcess(err) {
+			return nil
+		}
 		return err
 	}
 
@@ -109,8 +137,9 @@ func (daemon *Daemon) Kill(container *container.Container) error {
 func (daemon *Daemon) killPossiblyDeadProcess(container *container.Container, sig int) error {
 	err := daemon.killWithSignal(container, sig)
 	if err == syscall.ESRCH {
-		logrus.Debugf("Cannot kill process (pid=%d) with signal %d: no such process.", container.GetPID(), sig)
-		return nil
+		e := errNoSuchProcess{container.GetPID(), sig}
+		logrus.Debug(e)
+		return e
 	}
 	return err
 }

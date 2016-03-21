@@ -89,6 +89,7 @@ func (s *DockerSuite) TestSaveSingleTag(c *check.C) {
 }
 
 func (s *DockerSuite) TestSaveCheckTimes(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	repoName := "busybox:latest"
 	out, _ := dockerCmd(c, "inspect", repoName)
 	data := []struct {
@@ -166,6 +167,16 @@ func (s *DockerSuite) TestSaveAndLoadRepoFlags(c *check.C) {
 	c.Assert(before, checker.Equals, after, check.Commentf("inspect is not the same after a save / load"))
 }
 
+func (s *DockerSuite) TestSaveWithNoExistImage(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+
+	imgName := "foobar-non-existing-image"
+
+	out, _, err := dockerCmdWithError("save", "-o", "test-img.tar", imgName)
+	c.Assert(err, checker.NotNil, check.Commentf("save image should fail for non-existing image"))
+	c.Assert(out, checker.Contains, fmt.Sprintf("No such image: %s", imgName))
+}
+
 func (s *DockerSuite) TestSaveMultipleNames(c *check.C) {
 	testRequires(c, DaemonIsLinux)
 	repoName := "foobar-save-multi-name-test"
@@ -222,7 +233,7 @@ func (s *DockerSuite) TestSaveRepoWithMultipleImages(c *check.C) {
 	}
 
 	// make the list of expected layers
-	out, _ = dockerCmd(c, "inspect", "-f", "{{.Id}}", "busybox:latest")
+	out = inspectField(c, "busybox:latest", "Id")
 	expected := []string{strings.TrimSpace(out), idFoo, idBar}
 
 	// prefixes are not in tar

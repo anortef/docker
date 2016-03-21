@@ -8,11 +8,11 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/api/server/httputils"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/filters"
-	timetypes "github.com/docker/docker/api/types/time"
 	"github.com/docker/docker/pkg/ioutils"
-	"github.com/docker/docker/pkg/jsonmessage"
+	"github.com/docker/engine-api/types"
+	"github.com/docker/engine-api/types/events"
+	"github.com/docker/engine-api/types/filters"
+	timetypes "github.com/docker/engine-api/types/time"
 	"golang.org/x/net/context"
 )
 
@@ -37,7 +37,7 @@ func (s *systemRouter) getInfo(ctx context.Context, w http.ResponseWriter, r *ht
 
 func (s *systemRouter) getVersion(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	info := s.backend.SystemVersion()
-	info.APIVersion = api.DefaultVersion
+	info.APIVersion = api.DefaultVersion.String()
 
 	return httputils.WriteJSON(w, http.StatusOK, info)
 }
@@ -68,16 +68,9 @@ func (s *systemRouter) getEvents(ctx context.Context, w http.ResponseWriter, r *
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-
-	// This is to ensure that the HTTP status code is sent immediately,
-	// so that it will not block the receiver.
-	w.WriteHeader(http.StatusOK)
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
-
 	output := ioutils.NewWriteFlusher(w)
 	defer output.Close()
+	output.Flush()
 
 	enc := json.NewEncoder(output)
 
@@ -98,8 +91,9 @@ func (s *systemRouter) getEvents(ctx context.Context, w http.ResponseWriter, r *
 	for {
 		select {
 		case ev := <-l:
-			jev, ok := ev.(*jsonmessage.JSONMessage)
+			jev, ok := ev.(events.Message)
 			if !ok {
+				logrus.Warnf("unexpected event message: %q", ev)
 				continue
 			}
 			if err := enc.Encode(jev); err != nil {
@@ -121,11 +115,12 @@ func (s *systemRouter) postAuth(ctx context.Context, w http.ResponseWriter, r *h
 	if err != nil {
 		return err
 	}
-	status, err := s.backend.AuthenticateToRegistry(config)
+	status, token, err := s.backend.AuthenticateToRegistry(config)
 	if err != nil {
 		return err
 	}
 	return httputils.WriteJSON(w, http.StatusOK, &types.AuthResponse{
-		Status: status,
+		Status:        status,
+		IdentityToken: token,
 	})
 }

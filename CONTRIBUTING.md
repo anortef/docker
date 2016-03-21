@@ -154,6 +154,8 @@ However, there might be a way to implement that feature *on top of* Docker.
       The <a href="https://groups.google.com/forum/#!forum/docker-dev" target="_blank">docker-dev</a>
       group is for contributors and other people contributing to the Docker
       project.
+      You can join them without an google account by sending an email to e.g. "docker-user+subscribe@googlegroups.com".
+      After receiving the join-request message, you can simply reply to that to confirm the subscribtion.
     </td>
   </tr>
   <tr>
@@ -344,6 +346,12 @@ guidelines for the community as a whole:
   avoid off-topic discussions. Remember when you update an issue or respond
   to an email you are potentially sending to a large number of people. Please
   consider this before you update. Also remember that nobody likes spam.
+
+* Don't send email to the maintainers: There's no need to send email to the
+  maintainers to ask them to investigate an issue or to take a look at a
+  pull request. Instead of sending an email, GitHub mentions should be
+  used to ping maintainers to review a pull request, a proposal or an
+  issue.
 
 ### Guideline violations — 3 strikes method
 

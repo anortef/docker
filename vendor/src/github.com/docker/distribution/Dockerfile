@@ -1,4 +1,4 @@
-FROM golang:1.4
+FROM golang:1.5.3
 
 RUN apt-get update && \
     apt-get install -y librados-dev apache2-utils && \
@@ -16,4 +16,4 @@ RUN make PREFIX=/go clean binaries
 VOLUME ["/var/lib/registry"]
 EXPOSE 5000
 ENTRYPOINT ["registry"]
-CMD ["/etc/docker/registry/config.yml"]
+CMD ["serve", "/etc/docker/registry/config.yml"]

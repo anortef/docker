@@ -1,4 +1,5 @@
-# Notary [![Circle CI](https://circleci.com/gh/docker/notary/tree/master.svg?style=shield)](https://circleci.com/gh/docker/notary/tree/master)
+# Notary 
+[![Circle CI](https://circleci.com/gh/docker/notary/tree/master.svg?style=shield)](https://circleci.com/gh/docker/notary/tree/master) [![CodeCov](https://codecov.io/github/docker/notary/coverage.svg?branch=master)](https://codecov.io/github/docker/notary)
 
 The Notary project comprises a [server](cmd/notary-server) and a [client](cmd/notary) for running and interacting
 with trusted collections.
@@ -87,7 +88,7 @@ curl example.com/install.sh | notary verify example.com/scripts v1 | sh
 # Notary Server
 
 Notary Server manages TUF data over an HTTP API compatible with the
-[notary client](../notary/).
+[notary client](cmd/notary).
 
 It may be configured to use either JWT or HTTP Basic Auth for authentication.
 Currently it only supports MySQL for storage of the TUF data, we intend to

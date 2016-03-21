@@ -26,17 +26,22 @@
 	# the release process is clear and up-to-date.
 
 		people = [
+			"aaronlehmann",
 			"calavera",
+			"coolljt0725",
 			"cpuguy83",
 			"crosbymichael",
 			"duglin",
 			"estesp",
 			"icecrime",
+			"jhowardmsft",
 			"jfrazelle",
 			"lk4d4",
+			"mhbauer",
 			"runcom",
 			"tianon",
 			"tibor",
+			"tonistiigi",
 			"unclejack",
 			"vbatts",
 			"vdemeester"
@@ -66,6 +71,7 @@
 	# - close an issue or pull request when it's inappropriate or off-topic
 
 		people = [
+			"programmerq",
 			"thajeztah"
 		]
 
@@ -76,7 +82,7 @@
 	# Thank you!
 
 		people = [
-			# As a maintainer, Erik was responsible for the "builder", and 
+			# As a maintainer, Erik was responsible for the "builder", and
 			# started the first designs for the new networking model in
 			# Docker. Erik is now working on all kinds of plugins for Docker
 			# (https://github.com/contiv) and various open source projects
@@ -108,10 +114,20 @@
 
 	# ADD YOURSELF HERE IN ALPHABETICAL ORDER
 
+	[people.aaronlehmann]
+	Name = "Aaron Lehmann"
+	Email = "aaron.lehmann@docker.com"
+	GitHub = "aaronlehmann"
+
 	[people.calavera]
 	Name = "David Calavera"
 	Email = "david.calavera@gmail.com"
 	GitHub = "calavera"
+
+	[people.coolljt0725]
+	Name = "Lei Jitang"
+	Email = "leijitang@huawei.com"
+	GitHub = "coolljt0725"
 
 	[people.cpuguy83]
 	Name = "Brian Goff"
@@ -122,6 +138,7 @@
 	Name = "Michael Crosby"
 	Email = "crosbymichael@gmail.com"
 	GitHub = "crosbymichael"
+
 	[people.duglin]
 	Name = "Doug Davis"
 	Email = "dug@us.ibm.com"
@@ -147,9 +164,14 @@
 	Email = "james@lovedthanlost.net"
 	GitHub = "jamtur01"
 
+	[people.jhowardmsft]
+	Name = "John Howard"
+	Email = "jhoward@microsoft.com"
+	GitHub = "jhowardmsft"
+
 	[people.jfrazelle]
 	Name = "Jessie Frazelle"
-	Email = "j@docker.com"
+	Email = "jess@linux.com"
 	GitHub = "jfrazelle"
 
 	[people.lk4d4]
@@ -157,14 +179,24 @@
 	Email = "lk4d4@docker.com"
 	GitHub = "lk4d4"
 
+	[people.mhbauer]
+	Name = "Morgan Bauer"
+	Email = "mbauer@us.ibm.com"
+	GitHub = "mhbauer"
+
 	[people.moxiegirl]
 	Name = "Mary Anthony"
 	Email = "mary.anthony@docker.com"
 	GitHub = "moxiegirl"
 
+	[people.programmerq]
+	Name = "Jeff Anderson"
+	Email = "jeff@docker.com"
+	GitHub = "programmerq"
+
 	[people.runcom]
 	Name = "Antonio Murdaca"
-	Email = "me@runcom.ninja"
+	Email = "runcom@redhat.com"
 	GitHub = "runcom"
 
 	[people.shykes]
@@ -182,11 +214,6 @@
 	Email = "github@gone.nl"
 	GitHub = "thaJeztah"
 
-	[people.theadactyl]
-	Name = "Thea Lamkin"
-	Email = "thea@docker.com"
-	GitHub = "theadactyl"
-
 	[people.tianon]
 	Name = "Tianon Gravi"
 	Email = "admwiggin@gmail.com"
@@ -196,6 +223,11 @@
 	Name = "Tibor Vass"
 	Email = "tibor@docker.com"
 	GitHub = "tiborvass"
+
+	[people.tonistiigi]
+	Name = "Tõnis Tiigi"
+	Email = "tonis@docker.com"
+	GitHub = "tonistiigi"
 
 	[people.unclejack]
 	Name = "Cristian Staretu"

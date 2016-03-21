@@ -15,12 +15,15 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/golang/protobuf/proto"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/criurpc"
+	"github.com/opencontainers/runc/libcontainer/utils"
+	"github.com/syndtr/gocapability/capability"
 	"github.com/vishvananda/netlink/nl"
 )
 
@@ -37,6 +40,8 @@ type linuxContainer struct {
 	criuPath      string
 	m             sync.Mutex
 	criuVersion   int
+	state         containerState
+	created       time.Time
 }
 
 // State represents a running container's state
@@ -103,6 +108,12 @@ type Container interface {
 	// errors:
 	// Systemerror - System error.
 	NotifyOOM() (<-chan struct{}, error)
+
+	// NotifyMemoryPressure returns a read-only channel signaling when the container reaches a given pressure level
+	//
+	// errors:
+	// Systemerror - System error.
+	NotifyMemoryPressure(level PressureLevel) (<-chan struct{}, error)
 }
 
 // ID returns the container's unique ID
@@ -128,7 +139,7 @@ func (c *linuxContainer) State() (*State, error) {
 }
 
 func (c *linuxContainer) Processes() ([]int, error) {
-	pids, err := c.cgroupManager.GetPids()
+	pids, err := c.cgroupManager.GetAllPids()
 	if err != nil {
 		return nil, newSystemError(err)
 	}
@@ -182,22 +193,30 @@ func (c *linuxContainer) Start(process *Process) error {
 		}
 		return newSystemError(err)
 	}
-	if doInit {
-		c.updateState(parent)
+	// generate a timestamp indicating when the container was started
+	c.created = time.Now().UTC()
+
+	c.state = &runningState{
+		c: c,
 	}
-	if c.config.Hooks != nil {
-		s := configs.HookState{
-			Version: c.config.Version,
-			ID:      c.id,
-			Pid:     parent.pid(),
-			Root:    c.config.Rootfs,
+	if doInit {
+		if err := c.updateState(parent); err != nil {
+			return err
 		}
-		for _, hook := range c.config.Hooks.Poststart {
-			if err := hook.Run(s); err != nil {
-				if err := parent.terminate(); err != nil {
-					logrus.Warn(err)
+		if c.config.Hooks != nil {
+			s := configs.HookState{
+				Version: c.config.Version,
+				ID:      c.id,
+				Pid:     parent.pid(),
+				Root:    c.config.Rootfs,
+			}
+			for _, hook := range c.config.Hooks.Poststart {
+				if err := hook.Run(s); err != nil {
+					if err := parent.terminate(); err != nil {
+						logrus.Warn(err)
+					}
+					return newSystemError(err)
 				}
-				return newSystemError(err)
 			}
 		}
 	}
@@ -250,37 +269,40 @@ func (c *linuxContainer) commandTemplate(p *Process, childPipe *os.File) (*exec.
 }
 
 func (c *linuxContainer) newInitProcess(p *Process, cmd *exec.Cmd, parentPipe, childPipe *os.File) (*initProcess, error) {
-	t := "_LIBCONTAINER_INITTYPE=standard"
-	cloneFlags := c.config.Namespaces.CloneFlags()
-	if cloneFlags&syscall.CLONE_NEWUSER != 0 {
-		if err := c.addUidGidMappings(cmd.SysProcAttr); err != nil {
-			// user mappings are not supported
-			return nil, err
-		}
-		enableSetgroups(cmd.SysProcAttr)
-		// Default to root user when user namespaces are enabled.
-		if cmd.SysProcAttr.Credential == nil {
-			cmd.SysProcAttr.Credential = &syscall.Credential{}
+	cmd.Env = append(cmd.Env, "_LIBCONTAINER_INITTYPE="+string(initStandard))
+	nsMaps := make(map[configs.NamespaceType]string)
+	for _, ns := range c.config.Namespaces {
+		if ns.Path != "" {
+			nsMaps[ns.Type] = ns.Path
 		}
 	}
-	cmd.Env = append(cmd.Env, t)
-	cmd.SysProcAttr.Cloneflags = cloneFlags
+	_, sharePidns := nsMaps[configs.NEWPID]
+	data, err := c.bootstrapData(c.config.Namespaces.CloneFlags(), nsMaps, "")
+	if err != nil {
+		return nil, err
+	}
 	return &initProcess{
-		cmd:        cmd,
-		childPipe:  childPipe,
-		parentPipe: parentPipe,
-		manager:    c.cgroupManager,
-		config:     c.newInitConfig(p),
-		container:  c,
-		process:    p,
+		cmd:           cmd,
+		childPipe:     childPipe,
+		parentPipe:    parentPipe,
+		manager:       c.cgroupManager,
+		config:        c.newInitConfig(p),
+		container:     c,
+		process:       p,
+		bootstrapData: data,
+		sharePidns:    sharePidns,
 	}, nil
 }
 
 func (c *linuxContainer) newSetnsProcess(p *Process, cmd *exec.Cmd, parentPipe, childPipe *os.File) (*setnsProcess, error) {
-	cmd.Env = append(cmd.Env, "_LIBCONTAINER_INITTYPE=setns")
+	cmd.Env = append(cmd.Env, "_LIBCONTAINER_INITTYPE="+string(initSetns))
+	state, err := c.currentState()
+	if err != nil {
+		return nil, newSystemError(err)
+	}
 	// for setns process, we dont have to set cloneflags as the process namespaces
 	// will only be set via setns syscall
-	data, err := c.bootstrapData(0, c.initProcess.pid(), p.consolePath)
+	data, err := c.bootstrapData(0, state.NamespacePaths, p.consolePath)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +319,7 @@ func (c *linuxContainer) newSetnsProcess(p *Process, cmd *exec.Cmd, parentPipe, 
 }
 
 func (c *linuxContainer) newInitConfig(process *Process) *initConfig {
-	return &initConfig{
+	cfg := &initConfig{
 		Config:           c.config,
 		Args:             process.Args,
 		Env:              process.Env,
@@ -306,7 +328,21 @@ func (c *linuxContainer) newInitConfig(process *Process) *initConfig {
 		Console:          process.consolePath,
 		Capabilities:     process.Capabilities,
 		PassedFilesCount: len(process.ExtraFiles),
+		ContainerId:      c.ID(),
+		NoNewPrivileges:  c.config.NoNewPrivileges,
+		AppArmorProfile:  c.config.AppArmorProfile,
+		ProcessLabel:     c.config.ProcessLabel,
 	}
+	if process.NoNewPrivileges != nil {
+		cfg.NoNewPrivileges = *process.NoNewPrivileges
+	}
+	if process.AppArmorProfile != "" {
+		cfg.AppArmorProfile = process.AppArmorProfile
+	}
+	if process.Label != "" {
+		cfg.ProcessLabel = process.Label
+	}
+	return cfg
 }
 
 func newPipe() (parent *os.File, child *os.File, err error) {
@@ -320,52 +356,51 @@ func newPipe() (parent *os.File, child *os.File, err error) {
 func (c *linuxContainer) Destroy() error {
 	c.m.Lock()
 	defer c.m.Unlock()
-	status, err := c.currentStatus()
-	if err != nil {
-		return err
-	}
-	if status != Destroyed {
-		return newGenericError(fmt.Errorf("container is not destroyed"), ContainerNotStopped)
-	}
-	if !c.config.Namespaces.Contains(configs.NEWPID) {
-		if err := killCgroupProcesses(c.cgroupManager); err != nil {
-			logrus.Warn(err)
-		}
-	}
-	err = c.cgroupManager.Destroy()
-	if rerr := os.RemoveAll(c.root); err == nil {
-		err = rerr
-	}
-	c.initProcess = nil
-	if c.config.Hooks != nil {
-		s := configs.HookState{
-			Version: c.config.Version,
-			ID:      c.id,
-			Root:    c.config.Rootfs,
-		}
-		for _, hook := range c.config.Hooks.Poststop {
-			if err := hook.Run(s); err != nil {
-				return err
-			}
-		}
-	}
-	return err
+	return c.state.destroy()
 }
 
 func (c *linuxContainer) Pause() error {
 	c.m.Lock()
 	defer c.m.Unlock()
-	return c.cgroupManager.Freeze(configs.Frozen)
+	status, err := c.currentStatus()
+	if err != nil {
+		return err
+	}
+	if status != Running {
+		return newGenericError(fmt.Errorf("container not running"), ContainerNotRunning)
+	}
+	if err := c.cgroupManager.Freeze(configs.Frozen); err != nil {
+		return err
+	}
+	return c.state.transition(&pausedState{
+		c: c,
+	})
 }
 
 func (c *linuxContainer) Resume() error {
 	c.m.Lock()
 	defer c.m.Unlock()
-	return c.cgroupManager.Freeze(configs.Thawed)
+	status, err := c.currentStatus()
+	if err != nil {
+		return err
+	}
+	if status != Paused {
+		return newGenericError(fmt.Errorf("container not paused"), ContainerNotPaused)
+	}
+	if err := c.cgroupManager.Freeze(configs.Thawed); err != nil {
+		return err
+	}
+	return c.state.transition(&runningState{
+		c: c,
+	})
 }
 
 func (c *linuxContainer) NotifyOOM() (<-chan struct{}, error) {
 	return notifyOnOOM(c.cgroupManager.GetPaths())
+}
+
+func (c *linuxContainer) NotifyMemoryPressure(level PressureLevel) (<-chan struct{}, error) {
+	return notifyMemoryPressure(c.cgroupManager.GetPaths(), level)
 }
 
 // XXX debug support, remove when debugging done.
@@ -459,7 +494,7 @@ func (c *linuxContainer) Checkpoint(criuOpts *CriuOpts) error {
 	}
 
 	if criuOpts.ImagesDirectory == "" {
-		criuOpts.ImagesDirectory = filepath.Join(c.root, "criu.image")
+		return fmt.Errorf("invalid directory to save checkpoint")
 	}
 
 	// Since a container can be C/R'ed multiple times,
@@ -578,11 +613,9 @@ func (c *linuxContainer) addCriuRestoreMount(req *criurpc.CriuReq, m *configs.Mo
 func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 	c.m.Lock()
 	defer c.m.Unlock()
-
 	if err := c.checkCriuVersion("1.5.2"); err != nil {
 		return err
 	}
-
 	if criuOpts.WorkDirectory == "" {
 		criuOpts.WorkDirectory = filepath.Join(c.root, "criu.work")
 	}
@@ -591,22 +624,19 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 	if err := os.Mkdir(criuOpts.WorkDirectory, 0655); err != nil && !os.IsExist(err) {
 		return err
 	}
-
 	workDir, err := os.Open(criuOpts.WorkDirectory)
 	if err != nil {
 		return err
 	}
 	defer workDir.Close()
-
 	if criuOpts.ImagesDirectory == "" {
-		criuOpts.ImagesDirectory = filepath.Join(c.root, "criu.image")
+		return fmt.Errorf("invalid directory to restore checkpoint")
 	}
 	imageDir, err := os.Open(criuOpts.ImagesDirectory)
 	if err != nil {
 		return err
 	}
 	defer imageDir.Close()
-
 	// CRIU has a few requirements for a root directory:
 	// * it must be a mount point
 	// * its parent must not be overmounted
@@ -617,18 +647,15 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 		return err
 	}
 	defer os.Remove(root)
-
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		return err
 	}
-
 	err = syscall.Mount(c.config.Rootfs, root, "", syscall.MS_BIND|syscall.MS_REC, "")
 	if err != nil {
 		return err
 	}
 	defer syscall.Unmount(root, syscall.MNT_DETACH)
-
 	t := criurpc.CriuReqType_RESTORE
 	req := &criurpc.CriuReq{
 		Type: &t,
@@ -696,15 +723,13 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 		fds    []string
 		fdJSON []byte
 	)
-
 	if fdJSON, err = ioutil.ReadFile(filepath.Join(criuOpts.ImagesDirectory, descriptorsFilename)); err != nil {
 		return err
 	}
 
-	if err = json.Unmarshal(fdJSON, &fds); err != nil {
+	if err := json.Unmarshal(fdJSON, &fds); err != nil {
 		return err
 	}
-
 	for i := range fds {
 		if s := fds[i]; strings.Contains(s, "pipe:") {
 			inheritFd := new(criurpc.InheritFd)
@@ -713,12 +738,7 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 			req.Opts.InheritFd = append(req.Opts.InheritFd, inheritFd)
 		}
 	}
-
-	err = c.criuSwrk(process, req, criuOpts, true)
-	if err != nil {
-		return err
-	}
-	return nil
+	return c.criuSwrk(process, req, criuOpts, true)
 }
 
 func (c *linuxContainer) criuApplyCgroups(pid int, req *criurpc.CriuReq) error {
@@ -913,46 +933,43 @@ func (c *linuxContainer) criuNotifications(resp *criurpc.CriuResp, process *Proc
 	if notify == nil {
 		return fmt.Errorf("invalid response: %s", resp.String())
 	}
-
 	switch {
 	case notify.GetScript() == "post-dump":
-		if !opts.LeaveRunning {
-			f, err := os.Create(filepath.Join(c.root, "checkpoint"))
-			if err != nil {
-				return err
-			}
-			f.Close()
+		f, err := os.Create(filepath.Join(c.root, "checkpoint"))
+		if err != nil {
+			return err
 		}
-		break
-
+		f.Close()
 	case notify.GetScript() == "network-unlock":
 		if err := unlockNetwork(c.config); err != nil {
 			return err
 		}
-		break
-
 	case notify.GetScript() == "network-lock":
 		if err := lockNetwork(c.config); err != nil {
 			return err
 		}
-		break
-
 	case notify.GetScript() == "post-restore":
 		pid := notify.GetPid()
 		r, err := newRestoredProcess(int(pid), fds)
 		if err != nil {
 			return err
 		}
-
-		// TODO: crosbymichael restore previous process information by saving the init process information in
-		// the container's state file or separate process state files.
+		process.ops = r
+		if err := c.state.transition(&restoredState{
+			imageDir: opts.ImagesDirectory,
+			c:        c,
+		}); err != nil {
+			return err
+		}
 		if err := c.updateState(r); err != nil {
 			return err
 		}
-		process.ops = r
-		break
+		if err := os.Remove(filepath.Join(c.root, "checkpoint")); err != nil {
+			if !os.IsNotExist(err) {
+				logrus.Error(err)
+			}
+		}
 	}
-
 	return nil
 }
 
@@ -962,82 +979,179 @@ func (c *linuxContainer) updateState(process parentProcess) error {
 	if err != nil {
 		return err
 	}
+	return c.saveState(state)
+}
+
+func (c *linuxContainer) saveState(s *State) error {
 	f, err := os.Create(filepath.Join(c.root, stateFilename))
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	os.Remove(filepath.Join(c.root, "checkpoint"))
-	return json.NewEncoder(f).Encode(state)
+	return utils.WriteJSON(f, s)
+}
+
+func (c *linuxContainer) deleteState() error {
+	return os.Remove(filepath.Join(c.root, stateFilename))
 }
 
 func (c *linuxContainer) currentStatus() (Status, error) {
-	if _, err := os.Stat(filepath.Join(c.root, "checkpoint")); err == nil {
-		return Checkpointed, nil
+	if err := c.refreshState(); err != nil {
+		return -1, err
 	}
+	return c.state.status(), nil
+}
+
+// refreshState needs to be called to verify that the current state on the
+// container is what is true.  Because consumers of libcontainer can use it
+// out of process we need to verify the container's status based on runtime
+// information and not rely on our in process info.
+func (c *linuxContainer) refreshState() error {
+	paused, err := c.isPaused()
+	if err != nil {
+		return err
+	}
+	if paused {
+		return c.state.transition(&pausedState{c: c})
+	}
+	running, err := c.isRunning()
+	if err != nil {
+		return err
+	}
+	if running {
+		return c.state.transition(&runningState{c: c})
+	}
+	return c.state.transition(&stoppedState{c: c})
+}
+
+func (c *linuxContainer) isRunning() (bool, error) {
 	if c.initProcess == nil {
-		return Destroyed, nil
+		return false, nil
 	}
 	// return Running if the init process is alive
 	if err := syscall.Kill(c.initProcess.pid(), 0); err != nil {
 		if err == syscall.ESRCH {
-			return Destroyed, nil
+			return false, nil
 		}
-		return 0, newSystemError(err)
+		return false, newSystemError(err)
 	}
-	if c.config.Cgroups != nil && c.config.Cgroups.Freezer == configs.Frozen {
-		return Paused, nil
+	return true, nil
+}
+
+func (c *linuxContainer) isPaused() (bool, error) {
+	data, err := ioutil.ReadFile(filepath.Join(c.cgroupManager.GetPaths()["freezer"], "freezer.state"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, newSystemError(err)
 	}
-	return Running, nil
+	return bytes.Equal(bytes.TrimSpace(data), []byte("FROZEN")), nil
 }
 
 func (c *linuxContainer) currentState() (*State, error) {
-	status, err := c.currentStatus()
-	if err != nil {
-		return nil, err
-	}
-	if status == Destroyed {
-		return nil, newGenericError(fmt.Errorf("container destroyed"), ContainerNotExists)
-	}
-	startTime, err := c.initProcess.startTime()
-	if err != nil {
-		return nil, newSystemError(err)
+	var (
+		startTime           string
+		externalDescriptors []string
+		pid                 = -1
+	)
+	if c.initProcess != nil {
+		pid = c.initProcess.pid()
+		startTime, _ = c.initProcess.startTime()
+		externalDescriptors = c.initProcess.externalDescriptors()
 	}
 	state := &State{
 		BaseState: BaseState{
 			ID:                   c.ID(),
 			Config:               *c.config,
-			InitProcessPid:       c.initProcess.pid(),
+			InitProcessPid:       pid,
 			InitProcessStartTime: startTime,
+			Created:              c.created,
 		},
 		CgroupPaths:         c.cgroupManager.GetPaths(),
 		NamespacePaths:      make(map[configs.NamespaceType]string),
-		ExternalDescriptors: c.initProcess.externalDescriptors(),
+		ExternalDescriptors: externalDescriptors,
 	}
-	for _, ns := range c.config.Namespaces {
-		state.NamespacePaths[ns.Type] = ns.GetPath(c.initProcess.pid())
-	}
-	for _, nsType := range configs.NamespaceTypes() {
-		if _, ok := state.NamespacePaths[nsType]; !ok {
-			ns := configs.Namespace{Type: nsType}
-			state.NamespacePaths[ns.Type] = ns.GetPath(c.initProcess.pid())
+	if pid > 0 {
+		for _, ns := range c.config.Namespaces {
+			state.NamespacePaths[ns.Type] = ns.GetPath(pid)
+		}
+		for _, nsType := range configs.NamespaceTypes() {
+			if !configs.IsNamespaceSupported(nsType) {
+				continue
+			}
+			if _, ok := state.NamespacePaths[nsType]; !ok {
+				ns := configs.Namespace{Type: nsType}
+				state.NamespacePaths[ns.Type] = ns.GetPath(pid)
+			}
 		}
 	}
 	return state, nil
 }
 
-// bootstrapData encodes the necessary data in netlink binary format as a io.Reader.
-// Consumer can write the data to a bootstrap program such as one that uses
-// nsenter package to bootstrap the container's init process correctly, i.e. with
-// correct namespaces, uid/gid mapping etc.
-func (c *linuxContainer) bootstrapData(cloneFlags uintptr, pid int, consolePath string) (io.Reader, error) {
+// orderNamespacePaths sorts namespace paths into a list of paths that we
+// can setns in order.
+func (c *linuxContainer) orderNamespacePaths(namespaces map[configs.NamespaceType]string) ([]string, error) {
+	paths := []string{}
+	nsTypes := []configs.NamespaceType{
+		configs.NEWIPC,
+		configs.NEWUTS,
+		configs.NEWNET,
+		configs.NEWPID,
+		configs.NEWNS,
+	}
+	// join userns if the init process explicitly requires NEWUSER
+	if c.config.Namespaces.Contains(configs.NEWUSER) {
+		nsTypes = append(nsTypes, configs.NEWUSER)
+	}
+	for _, nsType := range nsTypes {
+		if p, ok := namespaces[nsType]; ok && p != "" {
+			// check if the requested namespace is supported
+			if !configs.IsNamespaceSupported(nsType) {
+				return nil, newSystemError(fmt.Errorf("namespace %s is not supported", nsType))
+			}
+			// only set to join this namespace if it exists
+			if _, err := os.Lstat(p); err != nil {
+				return nil, newSystemError(err)
+			}
+			// do not allow namespace path with comma as we use it to separate
+			// the namespace paths
+			if strings.ContainsRune(p, ',') {
+				return nil, newSystemError(fmt.Errorf("invalid path %s", p))
+			}
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
+func encodeIDMapping(idMap []configs.IDMap) ([]byte, error) {
+	data := bytes.NewBuffer(nil)
+	for _, im := range idMap {
+		line := fmt.Sprintf("%d %d %d\n", im.ContainerID, im.HostID, im.Size)
+		if _, err := data.WriteString(line); err != nil {
+			return nil, err
+		}
+	}
+	return data.Bytes(), nil
+}
+
+// bootstrapData encodes the necessary data in netlink binary format
+// as a io.Reader.
+// Consumer can write the data to a bootstrap program
+// such as one that uses nsenter package to bootstrap the container's
+// init process correctly, i.e. with correct namespaces, uid/gid
+// mapping etc.
+func (c *linuxContainer) bootstrapData(cloneFlags uintptr, nsMaps map[configs.NamespaceType]string, consolePath string) (io.Reader, error) {
 	// create the netlink message
 	r := nl.NewNetlinkRequest(int(InitMsg), 0)
-	// write pid
+
+	// write cloneFlags
 	r.AddData(&Int32msg{
-		Type:  PidAttr,
-		Value: uint32(pid),
+		Type:  CloneFlagsAttr,
+		Value: uint32(cloneFlags),
 	})
+
 	// write console path
 	if consolePath != "" {
 		r.AddData(&Bytemsg{
@@ -1045,5 +1159,57 @@ func (c *linuxContainer) bootstrapData(cloneFlags uintptr, pid int, consolePath 
 			Value: []byte(consolePath),
 		})
 	}
+
+	// write custom namespace paths
+	if len(nsMaps) > 0 {
+		nsPaths, err := c.orderNamespacePaths(nsMaps)
+		if err != nil {
+			return nil, err
+		}
+		r.AddData(&Bytemsg{
+			Type:  NsPathsAttr,
+			Value: []byte(strings.Join(nsPaths, ",")),
+		})
+	}
+
+	// write namespace paths only when we are not joining an existing user ns
+	_, joinExistingUser := nsMaps[configs.NEWUSER]
+	if !joinExistingUser {
+		// write uid mappings
+		if len(c.config.UidMappings) > 0 {
+			b, err := encodeIDMapping(c.config.UidMappings)
+			if err != nil {
+				return nil, err
+			}
+			r.AddData(&Bytemsg{
+				Type:  UidmapAttr,
+				Value: b,
+			})
+		}
+
+		// write gid mappings
+		if len(c.config.GidMappings) > 0 {
+			b, err := encodeIDMapping(c.config.UidMappings)
+			if err != nil {
+				return nil, err
+			}
+			r.AddData(&Bytemsg{
+				Type:  GidmapAttr,
+				Value: b,
+			})
+			// check if we have CAP_SETGID to setgroup properly
+			pid, err := capability.NewPid(os.Getpid())
+			if err != nil {
+				return nil, err
+			}
+			if !pid.Get(capability.EFFECTIVE, capability.CAP_SETGID) {
+				r.AddData(&Boolmsg{
+					Type:  SetgroupAttr,
+					Value: true,
+				})
+			}
+		}
+	}
+
 	return bytes.NewReader(r.Serialize()), nil
 }

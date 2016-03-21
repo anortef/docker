@@ -4,7 +4,8 @@ title = "Docker run reference"
 description = "Configure containers at runtime"
 keywords = ["docker, run, configure,  runtime"]
 [menu.main]
-parent = "mn_reference"
+parent = "engine_ref"
+weight=-80
 +++
 <![end-metadata]-->
 
@@ -206,10 +207,27 @@ on the system.  For example, you could build a container with debugging tools
 like `strace` or `gdb`, but want to use these tools when debugging processes
 within the container.
 
-    $ docker run --pid=host rhel7 strace -p 1234
+### Example: run htop inside a container
 
-This command would allow you to use `strace` inside the container on pid 1234 on
-the host.
+Create this Dockerfile:
+
+```
+FROM alpine:latest
+RUN apk add --update htop && rm -rf /var/cache/apk/*
+CMD ["htop"]
+```
+
+Build the Dockerfile and tag the image as `myhtop`:
+
+```bash
+$ docker build -t myhtop .
+```
+
+Use the following command to run `htop` inside a container:
+
+```
+$ docker run -it --rm --pid=host myhtop
+```
 
 ## UTS settings (--uts)
 
@@ -219,14 +237,12 @@ the host.
 The UTS namespace is for setting the hostname and the domain that is visible
 to running processes in that namespace.  By default, all containers, including
 those with `--net=host`, have their own UTS namespace.  The `host` setting will
-result in the container using the same UTS namespace as the host.
+result in the container using the same UTS namespace as the host.  Note that
+`--hostname` is invalid in `host` UTS mode.
 
 You may wish to share the UTS namespace with the host if you would like the
 hostname of the container to change as the hostname of the host changes.  A
 more advanced use case would be changing the host's hostname from a container.
-
-> **Note**: `--uts="host"` gives the container full access to change the
-> hostname of the host and is therefore considered insecure.
 
 ## IPC settings (--ipc)
 
@@ -256,8 +272,11 @@ of the containers.
                         'container:<name|id>': reuse another container's network stack
                         'host': use the Docker host network stack
                         '<network-name>|<network-id>': connect to a user-defined network
+    --net-alias=[]   : Add network-scoped alias for the container
     --add-host=""    : Add a line to /etc/hosts (host:IP)
     --mac-address="" : Sets the container's Ethernet device's MAC address
+    --ip=""          : Sets the container's Ethernet device's IPv4 address
+    --ip6=""         : Sets the container's Ethernet device's IPv6 address
 
 By default, all containers have networking enabled and they can make any
 outgoing connections. The operator can completely disable networking
@@ -265,7 +284,7 @@ with `docker run --net none` which disables all incoming and outgoing
 networking. In cases like this, you would perform I/O through files or
 `STDIN` and `STDOUT` only.
 
-Publishing ports and linking to other containers only works with the the default (bridge). The linking feature is a legacy feature. You should always prefer using Docker network drivers over linking.
+Publishing ports and linking to other containers only works with the default (bridge). The linking feature is a legacy feature. You should always prefer using Docker network drivers over linking.
 
 Your container will use the same DNS servers as the host by default, but
 you can override this with `--dns`.
@@ -344,8 +363,11 @@ name, they must be linked.
 With the network set to `host` a container will share the host's
 network stack and all interfaces from the host will be available to the
 container.  The container's hostname will match the hostname on the host
-system.  Note that `--add-host` `--hostname`  `--dns` `--dns-search`
-`--dns-opt` and `--mac-address` are invalid in `host` netmode.
+system.  Note that `--add-host` `--dns` `--dns-search`
+`--dns-opt` and `--mac-address` are invalid in `host` netmode. Even in `host`
+network mode a container has its own UTS namespace by default. As such
+`--hostname` is allowed in `host` network mode and will only change the
+hostname inside the container.
 
 Compared to the default `bridge` mode, the `host` mode gives *significantly*
 better networking performance since it uses the host's native networking stack
@@ -389,7 +411,7 @@ The following example creates a network using the built-in `bridge` network
 driver and running a container in the created network
 
 ```
-$ docker network create -d overlay my-net
+$ docker network create -d bridge my-net
 $ docker run --net=my-net -itd --name=container3 busybox
 ```
 
@@ -530,7 +552,7 @@ The exit code from `docker run` gives information about why the container
 failed to run or why it exited.  When `docker run` exits with a non-zero code,
 the exit codes follow the `chroot` standard, see below:
 
-**_125_** if the error is with Docker daemon **_itself_** 
+**_125_** if the error is with Docker daemon **_itself_**
 
     $ docker run --foo busybox; echo $?
     # flag provided but not defined: --foo
@@ -553,7 +575,7 @@ the exit codes follow the `chroot` standard, see below:
 
 **_Exit code_** of **_contained command_** otherwise
 
-    $ docker run busybox /bin/sh -c 'exit 3' 
+    $ docker run busybox /bin/sh -c 'exit 3'
     # 3
 
 ## Clean up (--rm)
@@ -570,41 +592,57 @@ the container exits**, you can add the `--rm` flag:
 
 > **Note**: When you set the `--rm` flag, Docker also removes the volumes
 associated with the container when the container is removed. This is similar
-to running `docker rm -v my-container`.
+to running `docker rm -v my-container`. Only volumes that are specified without a
+name are removed. For example, with
+`docker run --rm -v /foo -v awesome:/bar busybox top`, the volume for `/foo` will be removed,
+but the volume for `/bar` will not. Volumes inheritted via `--volumes-from` will be removed
+with the same logic -- if the original volume was specified with a name it will **not** be removed.
 
 ## Security configuration
-    --security-opt="label:user:USER"   : Set the label user for the container
-    --security-opt="label:role:ROLE"   : Set the label role for the container
-    --security-opt="label:type:TYPE"   : Set the label type for the container
-    --security-opt="label:level:LEVEL" : Set the label level for the container
-    --security-opt="label:disable"     : Turn off label confinement for the container
-    --security-opt="apparmor:PROFILE"  : Set the apparmor profile to be applied
+    --security-opt="label=user:USER"   : Set the label user for the container
+    --security-opt="label=role:ROLE"   : Set the label role for the container
+    --security-opt="label=type:TYPE"   : Set the label type for the container
+    --security-opt="label=level:LEVEL" : Set the label level for the container
+    --security-opt="label=disable"     : Turn off label confinement for the container
+    --security-opt="apparmor=PROFILE"  : Set the apparmor profile to be applied
                                          to the container
+    --security-opt="no-new-privileges" : Disable container processes from gaining
+                                         new privileges
+    --security-opt="seccomp:unconfined": Turn off seccomp confinement for the container
+    --security-opt="seccomp:profile.json: White listed syscalls seccomp Json file to be used as a seccomp filter
+
 
 You can override the default labeling scheme for each container by specifying
 the `--security-opt` flag. For example, you can specify the MCS/MLS level, a
 requirement for MLS systems. Specifying the level in the following command
 allows you to share the same content between containers.
 
-    $ docker run --security-opt label:level:s0:c100,c200 -it fedora bash
+    $ docker run --security-opt label=level:s0:c100,c200 -it fedora bash
 
 An MLS example might be:
 
-    $ docker run --security-opt label:level:TopSecret -it rhel7 bash
+    $ docker run --security-opt label=level:TopSecret -it rhel7 bash
 
 To disable the security labeling for this container versus running with the
 `--permissive` flag, use the following command:
 
-    $ docker run --security-opt label:disable -it fedora bash
+    $ docker run --security-opt label=disable -it fedora bash
 
 If you want a tighter security policy on the processes within a container,
 you can specify an alternate type for the container. You could run a container
 that is only allowed to listen on Apache ports by executing the following
 command:
 
-    $ docker run --security-opt label:type:svirt_apache_t -it centos bash
+    $ docker run --security-opt label=type:svirt_apache_t -it centos bash
 
 > **Note**: You would have to write policy defining a `svirt_apache_t` type.
+
+If you want to prevent your container processes from gaining additional
+privileges, you can execute the following command:
+
+    $ docker run --security-opt no-new-privileges -it centos bash
+
+For more details, see [kernel documentation](https://www.kernel.org/doc/Documentation/prctl/no_new_privs.txt).
 
 ## Specifying custom cgroups
 
@@ -976,9 +1014,9 @@ For example, to set `/dev/sda` device weight to `200`:
         ubuntu
 
 If you specify both the `--blkio-weight` and `--blkio-weight-device`, Docker
-uses the `--blkio-weight` as the default weight and uses `--blkio-weight-device` 
-to override this default with a new value on a specific device. 
-The following example uses a default weight of `300` and overrides this default 
+uses the `--blkio-weight` as the default weight and uses `--blkio-weight-device`
+to override this default with a new value on a specific device.
+The following example uses a default weight of `300` and overrides this default
 on `/dev/sda` setting that weight to `200`:
 
     $ docker run -it \
@@ -994,7 +1032,7 @@ per second from `/dev/sda`:
 
 The `--device-write-bps` flag limits the write rate (bytes per second)to a device.
 For example, this command creates a container and limits the write rate to `1mb`
-per second for `/dev/sda`: 
+per second for `/dev/sda`:
 
     $ docker run -it --device-write-bps /dev/sda:1mb ubuntu
 
@@ -1024,8 +1062,8 @@ By default, the docker container process runs with the supplementary groups look
 up for the specified user. If one wants to add more to that list of groups, then
 one can use this flag:
 
-    $ docker run -it --rm --group-add audio  --group-add dbus --group-add 777 busybox id
-    uid=0(root) gid=0(root) groups=10(wheel),29(audio),81(dbus),777
+    $ docker run --rm --group-add audio --group-add nogroup --group-add 777 busybox id
+    uid=0(root) gid=0(root) groups=10(wheel),29(audio),99(nogroup),777
 
 ## Runtime privilege and Linux capabilities
 
@@ -1034,10 +1072,18 @@ one can use this flag:
     --privileged=false: Give extended privileges to this container
     --device=[]: Allows you to run devices inside the container without the --privileged flag.
 
+> **Note:**
+> With Docker 1.10 and greater, the default seccomp profile will also block
+> syscalls, regardless of `--cap-add` passed to the container. We recommend in
+> these cases to create your own custom seccomp profile based off our
+> [default](https://github.com/docker/docker/blob/master/profiles/seccomp/default.json).
+> Or if you don't want to run with the default seccomp profile, you can pass
+> `--security-opt=seccomp=unconfined` on run.
+
 By default, Docker containers are "unprivileged" and cannot, for
 example, run a Docker daemon inside a Docker container. This is because
 by default a container is not allowed to access any devices, but a
-"privileged" container is given access to all devices (see 
+"privileged" container is given access to all devices (see
 the documentation on [cgroups devices](https://www.kernel.org/doc/Documentation/cgroups/devices.txt)).
 
 When the operator executes `docker run --privileged`, Docker will enable
@@ -1171,7 +1217,7 @@ container's logging driver. The following options are supported:
 
 The `docker logs` command is available only for the `json-file` and `journald`
 logging drivers.  For detailed information on working with logging drivers, see
-[Configure a logging driver](logging/overview.md).
+[Configure a logging driver](../admin/logging/overview.md).
 
 
 ## Overriding Dockerfile image defaults
@@ -1282,12 +1328,12 @@ specifies `EXPOSE 80` in the Dockerfile). At runtime, the port might be
 bound to 42800 on the host. To find the mapping between the host ports
 and the exposed ports, use `docker port`.
 
-If the operator uses `--link` when starting a new client container, then the
-client container can access the exposed port via a private networking interface.
-Linking is a legacy feature that is only supported on the default bridge
-network. You should prefer the Docker networks feature instead. For more
-information on this feature, see the [*Docker network
-overview*""](../userguide/networking/index.md)).
+If the operator uses `--link` when starting a new client container in the
+default bridge network, then the client container can access the exposed
+port via a private networking interface.
+If `--link` is used when starting a container in a user-defined network as
+described in [*Docker network overview*""](../userguide/networking/index.md)),
+it will provide a named alias for the container being linked to.
 
 ### ENV (environment variables)
 
@@ -1340,9 +1386,14 @@ Similarly the operator can set the **hostname** with `-h`.
 
 ### TMPFS (mount tmpfs filesystems)
 
-    --tmpfs=[]: Create a tmpfs mount with: container-dir[:<options>], where the options are identical to the Linux `mount -t tmpfs -o` command.
+```bash
+--tmpfs=[]: Create a tmpfs mount with: container-dir[:<options>],
+            where the options are identical to the Linux
+            'mount -t tmpfs -o' command.
+```
 
-    Underlying content from the "container-dir" is copied into tmpfs.
+The example below mounts an empty tmpfs into the container with the `rw`,
+`noexec`, `nosuid`, and `size=65536k` options.
 
     $ docker run -d --tmpfs /run:rw,noexec,nosuid,size=65536k my_image
 
@@ -1359,11 +1410,19 @@ Similarly the operator can set the **hostname** with `-h`.
     --volumes-from="": Mount all volumes from the given container(s)
 
 > **Note**:
-> The auto-creation of the host path has been [*deprecated*](../misc/deprecated.md#auto-creating-missing-host-paths-for-bind-mounts).
+> The auto-creation of the host path has been [*deprecated*](../deprecated.md#auto-creating-missing-host-paths-for-bind-mounts).
+
+> **Note**:
+> When using systemd to manage the Docker daemon's start and stop, in the systemd
+> unit file there is an option to control mount propagation for the Docker daemon
+> itself, called `MountFlags`. The value of this setting may cause Docker to not
+> see mount propagation changes made on the mount point. For example, if this value
+> is `slave`, you may not be able to use the `shared` or `rshared` propagation on
+> a volume.
 
 The volumes commands are complex enough to have their own documentation
 in section [*Managing data in
-containers*](../userguide/dockervolumes.md). A developer can define
+containers*](../userguide/containers/dockervolumes.md). A developer can define
 one or more `VOLUME`'s associated with an image, but only the operator
 can give access from one container to another (or from a container to a
 volume mounted on the host).
@@ -1391,7 +1450,10 @@ The developer can set a default user to run the first process with the
 Dockerfile `USER` instruction. When starting a container, the operator can override
 the `USER` instruction by passing the `-u` option.
 
-    -u="": Username or UID
+    -u="", --user="": Sets the username or UID used and optionally the groupname or GID for the specified command.
+ 
+    The followings examples are all valid:
+    --user=[ user | user:group | uid | uid:gid | user:gid | uid:group ]
 
 > **Note:** if you pass a numeric uid, it must be in the range of 0-2147483647.
 

@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/docker/docker/api"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/pkg/stringutils"
+	"github.com/docker/engine-api/types"
 	"github.com/docker/go-units"
 )
 
@@ -31,6 +31,7 @@ const (
 	repositoryHeader   = "REPOSITORY"
 	tagHeader          = "TAG"
 	digestHeader       = "DIGEST"
+	mountsHeader       = "MOUNTS"
 )
 
 type containerContext struct {
@@ -140,6 +141,25 @@ func (c *containerContext) Label(name string) string {
 		return ""
 	}
 	return c.c.Labels[name]
+}
+
+func (c *containerContext) Mounts() string {
+	c.addHeader(mountsHeader)
+
+	var name string
+	var mounts []string
+	for _, m := range c.c.Mounts {
+		if m.Name == "" {
+			name = m.Source
+		} else {
+			name = m.Name
+		}
+		if c.trunc {
+			name = stringutils.Truncate(name, 15)
+		}
+		mounts = append(mounts, name)
+	}
+	return strings.Join(mounts, ",")
 }
 
 type imageContext struct {

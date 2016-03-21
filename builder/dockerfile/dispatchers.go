@@ -18,20 +18,14 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/api"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/builder"
-	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/pkg/signal"
 	"github.com/docker/docker/pkg/system"
-	"github.com/docker/docker/runconfig"
+	runconfigopts "github.com/docker/docker/runconfig/opts"
+	"github.com/docker/engine-api/types/container"
+	"github.com/docker/engine-api/types/strslice"
 	"github.com/docker/go-connections/nat"
 )
-
-// dispatch with no layer / parsing. This is effectively not a command.
-func nullDispatch(b *Builder, args []string, attributes map[string]bool, original string) error {
-	return nil
-}
 
 // ENV foo bar
 //
@@ -40,12 +34,12 @@ func nullDispatch(b *Builder, args []string, attributes map[string]bool, origina
 //
 func env(b *Builder, args []string, attributes map[string]bool, original string) error {
 	if len(args) == 0 {
-		return derr.ErrorCodeAtLeastOneArg.WithArgs("ENV")
+		return errAtLeastOneArgument("ENV")
 	}
 
 	if len(args)%2 != 0 {
 		// should never get here, but just in case
-		return derr.ErrorCodeTooManyArgs.WithArgs("ENV")
+		return errTooManyArguments("ENV")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -99,7 +93,7 @@ func env(b *Builder, args []string, attributes map[string]bool, original string)
 // Sets the maintainer metadata.
 func maintainer(b *Builder, args []string, attributes map[string]bool, original string) error {
 	if len(args) != 1 {
-		return derr.ErrorCodeExactlyOneArg.WithArgs("MAINTAINER")
+		return errExactlyOneArgument("MAINTAINER")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -116,11 +110,11 @@ func maintainer(b *Builder, args []string, attributes map[string]bool, original 
 //
 func label(b *Builder, args []string, attributes map[string]bool, original string) error {
 	if len(args) == 0 {
-		return derr.ErrorCodeAtLeastOneArg.WithArgs("LABEL")
+		return errAtLeastOneArgument("LABEL")
 	}
 	if len(args)%2 != 0 {
 		// should never get here, but just in case
-		return derr.ErrorCodeTooManyArgs.WithArgs("LABEL")
+		return errTooManyArguments("LABEL")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -152,7 +146,7 @@ func label(b *Builder, args []string, attributes map[string]bool, original strin
 //
 func add(b *Builder, args []string, attributes map[string]bool, original string) error {
 	if len(args) < 2 {
-		return derr.ErrorCodeAtLeastTwoArgs.WithArgs("ADD")
+		return errAtLeastOneArgument("ADD")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -168,7 +162,7 @@ func add(b *Builder, args []string, attributes map[string]bool, original string)
 //
 func dispatchCopy(b *Builder, args []string, attributes map[string]bool, original string) error {
 	if len(args) < 2 {
-		return derr.ErrorCodeAtLeastTwoArgs.WithArgs("COPY")
+		return errAtLeastOneArgument("COPY")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -184,7 +178,7 @@ func dispatchCopy(b *Builder, args []string, attributes map[string]bool, origina
 //
 func from(b *Builder, args []string, attributes map[string]bool, original string) error {
 	if len(args) != 1 {
-		return derr.ErrorCodeExactlyOneArg.WithArgs("FROM")
+		return errExactlyOneArgument("FROM")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -193,6 +187,11 @@ func from(b *Builder, args []string, attributes map[string]bool, original string
 
 	name := args[0]
 
+	var (
+		image builder.Image
+		err   error
+	)
+
 	// Windows cannot support a container with no base image.
 	if name == api.NoBaseImageSpecifier {
 		if runtime.GOOS == "windows" {
@@ -200,24 +199,20 @@ func from(b *Builder, args []string, attributes map[string]bool, original string
 		}
 		b.image = ""
 		b.noBaseImage = true
-		return nil
-	}
-
-	var (
-		image builder.Image
-		err   error
-	)
-	// TODO: don't use `name`, instead resolve it to a digest
-	if !b.Pull {
-		image, err = b.docker.GetImage(name)
-		// TODO: shouldn't we error out if error is different from "not found" ?
-	}
-	if image == nil {
-		image, err = b.docker.Pull(name)
-		if err != nil {
-			return err
+	} else {
+		// TODO: don't use `name`, instead resolve it to a digest
+		if !b.options.PullParent {
+			image, err = b.docker.GetImageOnBuild(name)
+			// TODO: shouldn't we error out if error is different from "not found" ?
+		}
+		if image == nil {
+			image, err = b.docker.PullOnBuild(name, b.options.AuthConfigs, b.Output)
+			if err != nil {
+				return err
+			}
 		}
 	}
+
 	return b.processImageFrom(image)
 }
 
@@ -232,7 +227,7 @@ func from(b *Builder, args []string, attributes map[string]bool, original string
 //
 func onbuild(b *Builder, args []string, attributes map[string]bool, original string) error {
 	if len(args) == 0 {
-		return derr.ErrorCodeAtLeastOneArg.WithArgs("ONBUILD")
+		return errAtLeastOneArgument("ONBUILD")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -242,9 +237,9 @@ func onbuild(b *Builder, args []string, attributes map[string]bool, original str
 	triggerInstruction := strings.ToUpper(strings.TrimSpace(args[0]))
 	switch triggerInstruction {
 	case "ONBUILD":
-		return derr.ErrorCodeChainOnBuild
+		return fmt.Errorf("Chaining ONBUILD via `ONBUILD ONBUILD` isn't allowed")
 	case "MAINTAINER", "FROM":
-		return derr.ErrorCodeBadOnBuildCmd.WithArgs(triggerInstruction)
+		return fmt.Errorf("%s isn't allowed as an ONBUILD trigger", triggerInstruction)
 	}
 
 	original = regexp.MustCompile(`(?i)^\s*ONBUILD\s*`).ReplaceAllString(original, "")
@@ -259,7 +254,7 @@ func onbuild(b *Builder, args []string, attributes map[string]bool, original str
 //
 func workdir(b *Builder, args []string, attributes map[string]bool, original string) error {
 	if len(args) != 1 {
-		return derr.ErrorCodeExactlyOneArg.WithArgs("WORKDIR")
+		return errExactlyOneArgument("WORKDIR")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -292,7 +287,7 @@ func workdir(b *Builder, args []string, attributes map[string]bool, original str
 //
 func run(b *Builder, args []string, attributes map[string]bool, original string) error {
 	if b.image == "" && !b.noBaseImage {
-		return derr.ErrorCodeMissingFrom
+		return fmt.Errorf("Please provide a source image with `from` prior to run")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -310,17 +305,20 @@ func run(b *Builder, args []string, attributes map[string]bool, original string)
 	}
 
 	config := &container.Config{
-		Cmd:   strslice.New(args...),
+		Cmd:   strslice.StrSlice(args),
 		Image: b.image,
 	}
 
 	// stash the cmd
 	cmd := b.runConfig.Cmd
-	runconfig.Merge(b.runConfig, config)
+	if len(b.runConfig.Entrypoint) == 0 && len(b.runConfig.Cmd) == 0 {
+		b.runConfig.Cmd = config.Cmd
+	}
+
 	// stash the config environment
 	env := b.runConfig.Env
 
-	defer func(cmd *strslice.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
+	defer func(cmd strslice.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
 	defer func(env []string) { b.runConfig.Env = env }(env)
 
 	// derive the net build-time environment for this run. We let config
@@ -337,8 +335,8 @@ func run(b *Builder, args []string, attributes map[string]bool, original string)
 	// of RUN, without leaking it to the final image. It also aids cache
 	// lookup for same image built with same build time environment.
 	cmdBuildEnv := []string{}
-	configEnv := runconfig.ConvertKVStringsToMap(b.runConfig.Env)
-	for key, val := range b.BuildArgs {
+	configEnv := runconfigopts.ConvertKVStringsToMap(b.runConfig.Env)
+	for key, val := range b.options.BuildArgs {
 		if !b.isBuildArgAllowed(key) {
 			// skip build-args that are not in allowed list, meaning they have
 			// not been defined by an "ARG" Dockerfile command yet.
@@ -363,7 +361,7 @@ func run(b *Builder, args []string, attributes map[string]bool, original string)
 	if len(cmdBuildEnv) > 0 {
 		sort.Strings(cmdBuildEnv)
 		tmpEnv := append([]string{fmt.Sprintf("|%d", len(cmdBuildEnv))}, cmdBuildEnv...)
-		saveCmd = strslice.New(append(tmpEnv, saveCmd.Slice()...)...)
+		saveCmd = strslice.StrSlice(append(tmpEnv, saveCmd...))
 	}
 
 	b.runConfig.Cmd = saveCmd
@@ -421,7 +419,7 @@ func cmd(b *Builder, args []string, attributes map[string]bool, original string)
 		}
 	}
 
-	b.runConfig.Cmd = strslice.New(cmdSlice...)
+	b.runConfig.Cmd = strslice.StrSlice(cmdSlice)
 
 	if err := b.commit("", b.runConfig.Cmd, fmt.Sprintf("CMD %q", cmdSlice)); err != nil {
 		return err
@@ -452,16 +450,16 @@ func entrypoint(b *Builder, args []string, attributes map[string]bool, original 
 	switch {
 	case attributes["json"]:
 		// ENTRYPOINT ["echo", "hi"]
-		b.runConfig.Entrypoint = strslice.New(parsed...)
+		b.runConfig.Entrypoint = strslice.StrSlice(parsed)
 	case len(parsed) == 0:
 		// ENTRYPOINT []
 		b.runConfig.Entrypoint = nil
 	default:
 		// ENTRYPOINT echo hi
 		if runtime.GOOS != "windows" {
-			b.runConfig.Entrypoint = strslice.New("/bin/sh", "-c", parsed[0])
+			b.runConfig.Entrypoint = strslice.StrSlice{"/bin/sh", "-c", parsed[0]}
 		} else {
-			b.runConfig.Entrypoint = strslice.New("cmd", "/S", "/C", parsed[0])
+			b.runConfig.Entrypoint = strslice.StrSlice{"cmd", "/S", "/C", parsed[0]}
 		}
 	}
 
@@ -487,7 +485,7 @@ func expose(b *Builder, args []string, attributes map[string]bool, original stri
 	portsTab := args
 
 	if len(args) == 0 {
-		return derr.ErrorCodeAtLeastOneArg.WithArgs("EXPOSE")
+		return errAtLeastOneArgument("EXPOSE")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -526,7 +524,7 @@ func expose(b *Builder, args []string, attributes map[string]bool, original stri
 //
 func user(b *Builder, args []string, attributes map[string]bool, original string) error {
 	if len(args) != 1 {
-		return derr.ErrorCodeExactlyOneArg.WithArgs("USER")
+		return errExactlyOneArgument("USER")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -543,7 +541,7 @@ func user(b *Builder, args []string, attributes map[string]bool, original string
 //
 func volume(b *Builder, args []string, attributes map[string]bool, original string) error {
 	if len(args) == 0 {
-		return derr.ErrorCodeAtLeastOneArg.WithArgs("VOLUME")
+		return errAtLeastOneArgument("VOLUME")
 	}
 
 	if err := b.flags.Parse(); err != nil {
@@ -556,7 +554,7 @@ func volume(b *Builder, args []string, attributes map[string]bool, original stri
 	for _, v := range args {
 		v = strings.TrimSpace(v)
 		if v == "" {
-			return derr.ErrorCodeVolumeEmpty
+			return fmt.Errorf("Volume specified can not be an empty string")
 		}
 		b.runConfig.Volumes[v] = struct{}{}
 	}
@@ -621,9 +619,21 @@ func arg(b *Builder, args []string, attributes map[string]bool, original string)
 	// If there is a default value associated with this arg then add it to the
 	// b.buildArgs if one is not already passed to the builder. The args passed
 	// to builder override the default value of 'arg'.
-	if _, ok := b.BuildArgs[name]; !ok && hasDefault {
-		b.BuildArgs[name] = value
+	if _, ok := b.options.BuildArgs[name]; !ok && hasDefault {
+		b.options.BuildArgs[name] = value
 	}
 
 	return b.commit("", b.runConfig.Cmd, fmt.Sprintf("ARG %s", arg))
+}
+
+func errAtLeastOneArgument(command string) error {
+	return fmt.Errorf("%s requires at least one argument", command)
+}
+
+func errExactlyOneArgument(command string) error {
+	return fmt.Errorf("%s requires exactly one argument", command)
+}
+
+func errTooManyArguments(command string) error {
+	return fmt.Errorf("Bad input to %s, too many arguments", command)
 }

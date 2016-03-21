@@ -29,11 +29,22 @@ export MAKEDIR="$SCRIPTDIR/make"
 
 # We're a nice, sexy, little shell script, and people might try to run us;
 # but really, they shouldn't. We want to be in a container!
-if [ "$PWD" != "/go/src/$DOCKER_PKG" ] || [ -z "$DOCKER_CROSSPLATFORMS" ]; then
+inContainer="AssumeSoInitially"
+if [ "$(go env GOHOSTOS)" = 'windows' ]; then
+	if [ -z "$FROM_DOCKERFILE" ]; then
+		unset inContainer
+	fi
+else
+	if [ "$PWD" != "/go/src/$DOCKER_PKG" ] || [ -z "$DOCKER_CROSSPLATFORMS" ]; then
+		unset inContainer
+	fi
+fi
+
+if [ -z "$inContainer" ]; then
 	{
-		echo "# WARNING! I don't seem to be running in the Docker container."
+		echo "# WARNING! I don't seem to be running in a Docker container."
 		echo "# The result of this command might be an incorrect build, and will not be"
-		echo "#   officially supported."
+		echo "# officially supported."
 		echo "#"
 		echo "# Try this instead: make all"
 		echo "#"
@@ -45,6 +56,7 @@ echo
 # List of bundles to create when no argument is passed
 DEFAULT_BUNDLES=(
 	validate-dco
+	validate-default-seccomp
 	validate-gofmt
 	validate-lint
 	validate-pkg
@@ -98,16 +110,18 @@ if [ ! "$GOPATH" ]; then
 	exit 1
 fi
 
-if [ "$DOCKER_EXPERIMENTAL" ] || [ "$DOCKER_REMAP_ROOT" ]; then
+if [ "$DOCKER_EXPERIMENTAL" ]; then
 	echo >&2 '# WARNING! DOCKER_EXPERIMENTAL is set: building experimental features'
 	echo >&2
-	DOCKER_BUILDTAGS+=" experimental pkcs11"
+	DOCKER_BUILDTAGS+=" experimental"
 fi
 
 if [ -z "$DOCKER_CLIENTONLY" ]; then
 	DOCKER_BUILDTAGS+=" daemon"
-	if pkg-config libsystemd-journal 2> /dev/null ; then
+	if pkg-config 'libsystemd >= 209' 2> /dev/null ; then
 		DOCKER_BUILDTAGS+=" journald"
+	elif pkg-config 'libsystemd-journal' 2> /dev/null ; then
+		DOCKER_BUILDTAGS+=" journald journald_compat"
 	fi
 fi
 
@@ -123,7 +137,7 @@ fi
 # functionality.
 if \
 	command -v gcc &> /dev/null \
-	&& ! ( echo -e  '#include <libdevmapper.h>\nint main() { dm_task_deferred_remove(NULL); }'| gcc -ldevmapper -xc - -o /dev/null &> /dev/null ) \
+	&& ! ( echo -e  '#include <libdevmapper.h>\nint main() { dm_task_deferred_remove(NULL); }'| gcc -xc - -o /dev/null -ldevmapper &> /dev/null ) \
 ; then
        DOCKER_BUILDTAGS+=' libdm_no_deferred_remove'
 fi
@@ -140,12 +154,27 @@ LDFLAGS_STATIC=''
 EXTLDFLAGS_STATIC='-static'
 # ORIG_BUILDFLAGS is necessary for the cross target which cannot always build
 # with options like -race.
-ORIG_BUILDFLAGS=( -a -tags "autogen netgo static_build sqlite_omit_load_extension $DOCKER_BUILDTAGS" -installsuffix netgo )
+ORIG_BUILDFLAGS=( -tags "autogen netgo static_build sqlite_omit_load_extension $DOCKER_BUILDTAGS" -installsuffix netgo )
 # see https://github.com/golang/go/issues/9369#issuecomment-69864440 for why -installsuffix is necessary here
+
+# When $DOCKER_INCREMENTAL_BINARY is set in the environment, enable incremental
+# builds by installing dependent packages to the GOPATH.
+REBUILD_FLAG="-a"
+if [ "$DOCKER_INCREMENTAL_BINARY" ]; then
+	REBUILD_FLAG="-i"
+fi
+ORIG_BUILDFLAGS+=( $REBUILD_FLAG )
+
 BUILDFLAGS=( $BUILDFLAGS "${ORIG_BUILDFLAGS[@]}" )
 # Test timeout.
-: ${TIMEOUT:=120m}
-TESTFLAGS+=" -test.timeout=${TIMEOUT}"
+
+if [ "${DOCKER_ENGINE_GOARCH}" == "arm" ]; then
+	: ${TIMEOUT:=10m}
+elif [ "${DOCKER_ENGINE_GOARCH}" == "windows" ]; then
+	: ${TIMEOUT:=8m}
+else
+	: ${TIMEOUT:=5m}
+fi
 
 LDFLAGS_STATIC_DOCKER="
 	$LDFLAGS_STATIC
@@ -210,16 +239,19 @@ test_env() {
 	# use "env -i" to tightly control the environment variables that bleed into the tests
 	env -i \
 		DEST="$DEST" \
+		DOCKER_TLS_VERIFY="$DOCKER_TEST_TLS_VERIFY" \
+		DOCKER_CERT_PATH="$DOCKER_TEST_CERT_PATH" \
+		DOCKER_ENGINE_GOARCH="$DOCKER_ENGINE_GOARCH" \
 		DOCKER_GRAPHDRIVER="$DOCKER_GRAPHDRIVER" \
 		DOCKER_USERLANDPROXY="$DOCKER_USERLANDPROXY" \
 		DOCKER_HOST="$DOCKER_HOST" \
 		DOCKER_REMAP_ROOT="$DOCKER_REMAP_ROOT" \
 		DOCKER_REMOTE_DAEMON="$DOCKER_REMOTE_DAEMON" \
 		GOPATH="$GOPATH" \
+		GOTRACEBACK=all \
 		HOME="$ABS_DEST/fake-HOME" \
 		PATH="$PATH" \
 		TEMP="$TEMP" \
-		TEST_DOCKERINIT_PATH="$TEST_DOCKERINIT_PATH" \
 		"$@"
 }
 

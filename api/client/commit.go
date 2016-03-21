@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
+	"golang.org/x/net/context"
+
 	Cli "github.com/docker/docker/cli"
 	"github.com/docker/docker/opts"
 	flag "github.com/docker/docker/pkg/mflag"
 	"github.com/docker/docker/reference"
+	"github.com/docker/engine-api/types"
+	"github.com/docker/engine-api/types/container"
 )
 
 // CmdCommit creates a new image from a container's changes.
@@ -73,7 +75,7 @@ func (cli *DockerCli) CmdCommit(args ...string) error {
 		Config:         config,
 	}
 
-	response, err := cli.client.ContainerCommit(options)
+	response, err := cli.client.ContainerCommit(context.Background(), options)
 	if err != nil {
 		return err
 	}

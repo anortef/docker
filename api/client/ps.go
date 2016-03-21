@@ -1,12 +1,14 @@
 package client
 
 import (
+	"golang.org/x/net/context"
+
 	"github.com/docker/docker/api/client/formatter"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/filters"
 	Cli "github.com/docker/docker/cli"
 	"github.com/docker/docker/opts"
 	flag "github.com/docker/docker/pkg/mflag"
+	"github.com/docker/engine-api/types"
+	"github.com/docker/engine-api/types/filters"
 )
 
 // CmdPs outputs a list of Docker containers.
@@ -56,7 +58,7 @@ func (cli *DockerCli) CmdPs(args ...string) error {
 		Filter: psFilterArgs,
 	}
 
-	containers, err := cli.client.ContainerList(options)
+	containers, err := cli.client.ContainerList(context.Background(), options)
 	if err != nil {
 		return err
 	}

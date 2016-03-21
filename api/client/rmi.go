@@ -3,10 +3,13 @@ package client
 import (
 	"fmt"
 	"net/url"
+	"strings"
 
-	"github.com/docker/docker/api/types"
+	"golang.org/x/net/context"
+
 	Cli "github.com/docker/docker/cli"
 	flag "github.com/docker/docker/pkg/mflag"
+	"github.com/docker/engine-api/types"
 )
 
 // CmdRmi removes all images with the specified name(s).
@@ -28,7 +31,7 @@ func (cli *DockerCli) CmdRmi(args ...string) error {
 		v.Set("noprune", "1")
 	}
 
-	var errNames []string
+	var errs []string
 	for _, name := range cmd.Args() {
 		options := types.ImageRemoveOptions{
 			ImageID:       name,
@@ -36,10 +39,9 @@ func (cli *DockerCli) CmdRmi(args ...string) error {
 			PruneChildren: !*noprune,
 		}
 
-		dels, err := cli.client.ImageRemove(options)
+		dels, err := cli.client.ImageRemove(context.Background(), options)
 		if err != nil {
-			fmt.Fprintf(cli.err, "%s\n", err)
-			errNames = append(errNames, name)
+			errs = append(errs, err.Error())
 		} else {
 			for _, del := range dels {
 				if del.Deleted != "" {
@@ -50,8 +52,8 @@ func (cli *DockerCli) CmdRmi(args ...string) error {
 			}
 		}
 	}
-	if len(errNames) > 0 {
-		return fmt.Errorf("Error: failed to remove images: %v", errNames)
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "\n"))
 	}
 	return nil
 }

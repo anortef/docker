@@ -6,7 +6,7 @@ machine:
 
   post:
   # Install many go versions
-    - gvm install go1.5.1 -B --name=stable
+    - gvm install go1.6 -B --name=stable
 
   environment:
   # Convenient shortcuts to "common" locations
@@ -16,6 +16,8 @@ machine:
     BASE_STABLE: ../../../$HOME/.gvm/pkgsets/stable/global/$BASE_DIR
   # Workaround Circle parsing dumb bugs and/or YAML wonkyness
     CIRCLE_PAIN: "mode: set"
+  # Put the coverage profile somewhere codecov's script can find it
+    COVERPROFILE: coverage.out
 
   hosts:
   # Not used yet
@@ -35,11 +37,11 @@ dependencies:
         pwd: $BASE_STABLE
 
   post:
-  # For the stable go version, additionally install linting tools
+  # For the stable go version, additionally install linting and misspell tools
     - >
       gvm use stable &&
-      go get github.com/golang/lint/golint github.com/wadey/gocovmerge &&
-      go install github.com/wadey/gocovmerge
+      go get github.com/golang/lint/golint &&
+      go get -u github.com/client9/misspell/cmd/misspell
 test:
   pre:
   # Output the go versions we are going to test
@@ -61,6 +63,10 @@ test:
     - gvm use stable && make lint:
         pwd: $BASE_STABLE
 
+  # MISSPELL
+    - gvm use stable && make misspell:
+        pwd: $BASE_STABLE
+
   override:
   # Test stable, and report
   # hacking this to be parallel
@@ -70,10 +76,7 @@ test:
         pwd: $BASE_STABLE
 
   post:
-    - gvm use stable && make covmerge:
-        timeout: 600
-        pwd: $BASE_STABLE
-
   # Report to codecov.io
-    # - bash <(curl -s https://codecov.io/bash):
-    #     pwd: $BASE_STABLE
+    - bash <(curl -s https://codecov.io/bash):
+        parallel: true
+        pwd: $BASE_STABLE

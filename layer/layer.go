@@ -1,11 +1,11 @@
-// Package layer is package for managing read only
+// Package layer is package for managing read-only
 // and read-write mounts on the union file system
 // driver. Read-only mounts are referenced using a
 // content hash and are protected from mutation in
 // the exposed interface. The tar format is used
-// to create read only layers and export both
-// read only and writable layers. The exported
-// tar data for a read only layer should match
+// to create read-only layers and export both
+// read-only and writable layers. The exported
+// tar data for a read-only layer should match
 // the tar used to create the layer.
 package layer
 
@@ -75,7 +75,7 @@ type TarStreamer interface {
 	TarStream() (io.ReadCloser, error)
 }
 
-// Layer represents a read only layer
+// Layer represents a read-only layer
 type Layer interface {
 	TarStreamer
 
@@ -138,7 +138,7 @@ type RWLayer interface {
 }
 
 // Metadata holds information about a
-// read only layer
+// read-only layer
 type Metadata struct {
 	// ChainID is the content hash of the layer
 	ChainID ChainID
@@ -169,6 +169,7 @@ type Store interface {
 
 	CreateRWLayer(id string, parent ChainID, mountLabel string, initFunc MountInit) (RWLayer, error)
 	GetRWLayer(id string) (RWLayer, error)
+	GetMountID(id string) (string, error)
 	ReleaseRWLayer(RWLayer) ([]Metadata, error)
 
 	Cleanup() error
@@ -183,7 +184,7 @@ type MetadataTransaction interface {
 	SetParent(parent ChainID) error
 	SetDiffID(DiffID) error
 	SetCacheID(string) error
-	TarSplitWriter() (io.WriteCloser, error)
+	TarSplitWriter(compressInput bool) (io.WriteCloser, error)
 
 	Commit(ChainID) error
 	Cancel() error
@@ -233,12 +234,7 @@ func createChainIDFromParent(parent ChainID, dgsts ...DiffID) ChainID {
 		return createChainIDFromParent(ChainID(dgsts[0]), dgsts[1:]...)
 	}
 	// H = "H(n-1) SHA256(n)"
-	dgst, err := digest.FromBytes([]byte(string(parent) + " " + string(dgsts[0])))
-	if err != nil {
-		// Digest calculation is not expected to throw an error,
-		// any error at this point is a program error
-		panic(err)
-	}
+	dgst := digest.FromBytes([]byte(string(parent) + " " + string(dgsts[0])))
 	return createChainIDFromParent(ChainID(dgst), dgsts[1:]...)
 }
 
@@ -252,7 +248,7 @@ func ReleaseAndLog(ls Store, l Layer) {
 	LogReleaseMetadata(metadata)
 }
 
-// LogReleaseMetadata logs a metadata array, use this to
+// LogReleaseMetadata logs a metadata array, uses this to
 // ensure consistent logging for release metadata
 func LogReleaseMetadata(metadatas []Metadata) {
 	for _, metadata := range metadatas {

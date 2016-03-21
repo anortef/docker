@@ -3,10 +3,12 @@ package client
 import (
 	"errors"
 
-	"github.com/docker/docker/api/types"
+	"golang.org/x/net/context"
+
 	Cli "github.com/docker/docker/cli"
 	flag "github.com/docker/docker/pkg/mflag"
 	"github.com/docker/docker/reference"
+	"github.com/docker/engine-api/types"
 )
 
 // CmdTag tags an image into a repository.
@@ -40,5 +42,5 @@ func (cli *DockerCli) CmdTag(args ...string) error {
 		Force:          *force,
 	}
 
-	return cli.client.ImageTag(options)
+	return cli.client.ImageTag(context.Background(), options)
 }

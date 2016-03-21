@@ -1,7 +1,18 @@
+// A Store that can fetch and set metadata on a remote server.
+// Some API constraints:
+// - Response bodies for error codes should be unmarshallable as:
+//   {"errors": [{..., "detail": <serialized validation error>}]}
+//   else validation error details, etc. will be unparsable.  The errors
+//   should have a github.com/docker/notary/tuf/validation/SerializableError
+//   in the Details field.
+//   If writing your own server, please have a look at
+//   github.com/docker/distribution/registry/api/errcode
+
 package store
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +23,8 @@ import (
 	"path"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/notary"
+	"github.com/docker/notary/tuf/validation"
 )
 
 // ErrServerUnavailable indicates an error from the server. code allows us to
@@ -21,7 +34,10 @@ type ErrServerUnavailable struct {
 }
 
 func (err ErrServerUnavailable) Error() string {
-	return fmt.Sprintf("Unable to reach trust server at this time: %d.", err.code)
+	if err.code == 401 {
+		return fmt.Sprintf("you are not authorized to perform this operation: server returned 401.")
+	}
+	return fmt.Sprintf("unable to reach trust server at this time: %d.", err.code)
 }
 
 // ErrMaliciousServer indicates the server returned a response that is highly suspected
@@ -30,7 +46,20 @@ func (err ErrServerUnavailable) Error() string {
 type ErrMaliciousServer struct{}
 
 func (err ErrMaliciousServer) Error() string {
-	return "Trust server returned a bad response."
+	return "trust server returned a bad response."
+}
+
+// ErrInvalidOperation indicates that the server returned a 400 response and
+// propagate any body we received.
+type ErrInvalidOperation struct {
+	msg string
+}
+
+func (err ErrInvalidOperation) Error() string {
+	if err.msg != "" {
+		return fmt.Sprintf("trust server rejected operation: %s", err.msg)
+	}
+	return "trust server rejected operation."
 }
 
 // HTTPStore manages pulling and pushing metadata from and to a remote
@@ -46,13 +75,12 @@ type HTTPStore struct {
 	baseURL       url.URL
 	metaPrefix    string
 	metaExtension string
-	targetsPrefix string
 	keyExtension  string
 	roundTrip     http.RoundTripper
 }
 
 // NewHTTPStore initializes a new store against a URL and a number of configuration options
-func NewHTTPStore(baseURL, metaPrefix, metaExtension, targetsPrefix, keyExtension string, roundTrip http.RoundTripper) (RemoteStore, error) {
+func NewHTTPStore(baseURL, metaPrefix, metaExtension, keyExtension string, roundTrip http.RoundTripper) (RemoteStore, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, err
@@ -60,19 +88,58 @@ func NewHTTPStore(baseURL, metaPrefix, metaExtension, targetsPrefix, keyExtensio
 	if !base.IsAbs() {
 		return nil, errors.New("HTTPStore requires an absolute baseURL")
 	}
+	if roundTrip == nil {
+		return &OfflineStore{}, nil
+	}
 	return &HTTPStore{
 		baseURL:       *base,
 		metaPrefix:    metaPrefix,
 		metaExtension: metaExtension,
-		targetsPrefix: targetsPrefix,
 		keyExtension:  keyExtension,
 		roundTrip:     roundTrip,
 	}, nil
 }
 
+func tryUnmarshalError(resp *http.Response, defaultError error) error {
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return defaultError
+	}
+	var parsedErrors struct {
+		Errors []struct {
+			Detail validation.SerializableError `json:"detail"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(bodyBytes, &parsedErrors); err != nil {
+		return defaultError
+	}
+	if len(parsedErrors.Errors) != 1 {
+		return defaultError
+	}
+	err = parsedErrors.Errors[0].Detail.Error
+	if err == nil {
+		return defaultError
+	}
+	return err
+}
+
+func translateStatusToError(resp *http.Response, resource string) error {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return ErrMetaNotFound{Resource: resource}
+	case http.StatusBadRequest:
+		return tryUnmarshalError(resp, ErrInvalidOperation{})
+	default:
+		return ErrServerUnavailable{code: resp.StatusCode}
+	}
+}
+
 // GetMeta downloads the named meta file with the given size. A short body
 // is acceptable because in the case of timestamp.json, the size is a cap,
 // not an exact length.
+// If size is -1, this corresponds to "infinite," but we cut off at 100MB
 func (s HTTPStore) GetMeta(name string, size int64) ([]byte, error) {
 	url, err := s.buildMetaURL(name)
 	if err != nil {
@@ -87,11 +154,12 @@ func (s HTTPStore) GetMeta(name string, size int64) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, ErrMetaNotFound{}
-	} else if resp.StatusCode != http.StatusOK {
+	if err := translateStatusToError(resp, name); err != nil {
 		logrus.Debugf("received HTTP status %d when requesting %s.", resp.StatusCode, name)
-		return nil, ErrServerUnavailable{code: resp.StatusCode}
+		return nil, err
+	}
+	if size == -1 {
+		size = notary.MaxDownloadSize
 	}
 	if resp.ContentLength > size {
 		return nil, ErrMaliciousServer{}
@@ -120,12 +188,37 @@ func (s HTTPStore) SetMeta(name string, blob []byte) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return ErrMetaNotFound{}
-	} else if resp.StatusCode != http.StatusOK {
-		return ErrServerUnavailable{code: resp.StatusCode}
+	return translateStatusToError(resp, "POST "+name)
+}
+
+// RemoveMeta always fails, because we should never be able to delete metadata
+// remotely
+func (s HTTPStore) RemoveMeta(name string) error {
+	return ErrInvalidOperation{msg: "cannot delete metadata"}
+}
+
+// NewMultiPartMetaRequest builds a request with the provided metadata updates
+// in multipart form
+func NewMultiPartMetaRequest(url string, metas map[string][]byte) (*http.Request, error) {
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	for role, blob := range metas {
+		part, err := writer.CreateFormFile("files", role)
+		_, err = io.Copy(part, bytes.NewBuffer(blob))
+		if err != nil {
+			return nil, err
+		}
 	}
-	return nil
+	err := writer.Close()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return req, nil
 }
 
 // SetMultiMeta does a single batch upload of multiple pieces of TUF metadata.
@@ -136,21 +229,7 @@ func (s HTTPStore) SetMultiMeta(metas map[string][]byte) error {
 	if err != nil {
 		return err
 	}
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	for role, blob := range metas {
-		part, err := writer.CreateFormFile("files", role)
-		_, err = io.Copy(part, bytes.NewBuffer(blob))
-		if err != nil {
-			return err
-		}
-	}
-	err = writer.Close()
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest("POST", url.String(), body)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req, err := NewMultiPartMetaRequest(url.String(), metas)
 	if err != nil {
 		return err
 	}
@@ -159,12 +238,13 @@ func (s HTTPStore) SetMultiMeta(metas map[string][]byte) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return ErrMetaNotFound{}
-	} else if resp.StatusCode != http.StatusOK {
-		return ErrServerUnavailable{code: resp.StatusCode}
-	}
-	return nil
+	// if this 404's something is pretty wrong
+	return translateStatusToError(resp, "POST metadata endpoint")
+}
+
+// RemoveAll in the interface is not supported, admins should use the DeleteHandler endpoint directly to delete remote data for a GUN
+func (s HTTPStore) RemoveAll() error {
+	return errors.New("remove all functionality not supported for HTTPStore")
 }
 
 func (s HTTPStore) buildMetaURL(name string) (*url.URL, error) {
@@ -173,11 +253,6 @@ func (s HTTPStore) buildMetaURL(name string) (*url.URL, error) {
 		filename = fmt.Sprintf("%s.%s", name, s.metaExtension)
 	}
 	uri := path.Join(s.metaPrefix, filename)
-	return s.buildURL(uri)
-}
-
-func (s HTTPStore) buildTargetsURL(name string) (*url.URL, error) {
-	uri := path.Join(s.targetsPrefix, name)
 	return s.buildURL(uri)
 }
 
@@ -195,31 +270,6 @@ func (s HTTPStore) buildURL(uri string) (*url.URL, error) {
 	return s.baseURL.ResolveReference(sub), nil
 }
 
-// GetTarget returns a reader for the desired target or an error.
-// N.B. The caller is responsible for closing the reader.
-func (s HTTPStore) GetTarget(path string) (io.ReadCloser, error) {
-	url, err := s.buildTargetsURL(path)
-	if err != nil {
-		return nil, err
-	}
-	logrus.Debug("Attempting to download target: ", url.String())
-	req, err := http.NewRequest("GET", url.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := s.roundTrip.RoundTrip(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, ErrMetaNotFound{}
-	} else if resp.StatusCode != http.StatusOK {
-		return nil, ErrServerUnavailable{code: resp.StatusCode}
-	}
-	return resp.Body, nil
-}
-
 // GetKey retrieves a public key from the remote server
 func (s HTTPStore) GetKey(role string) ([]byte, error) {
 	url, err := s.buildKeyURL(role)
@@ -235,10 +285,8 @@ func (s HTTPStore) GetKey(role string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, ErrMetaNotFound{}
-	} else if resp.StatusCode != http.StatusOK {
-		return nil, ErrServerUnavailable{code: resp.StatusCode}
+	if err := translateStatusToError(resp, role+" key"); err != nil {
+		return nil, err
 	}
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {

@@ -2,16 +2,15 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/docker/docker/api/types"
-	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
-	"github.com/docker/docker/daemon/execdriver"
-	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/volume"
+	"github.com/docker/engine-api/types"
+	containertypes "github.com/docker/engine-api/types/container"
 	"github.com/opencontainers/runc/libcontainer/label"
 )
 
@@ -21,7 +20,7 @@ var (
 	ErrVolumeReadonly = errors.New("mounted volume is marked read-only")
 )
 
-type mounts []execdriver.Mount
+type mounts []container.Mount
 
 // volumeToAPIType converts a volume.Volume to the type used by the remote API
 func volumeToAPIType(v volume.Volume) *types.Volume {
@@ -30,16 +29,6 @@ func volumeToAPIType(v volume.Volume) *types.Volume {
 		Driver:     v.DriverName(),
 		Mountpoint: v.Path(),
 	}
-}
-
-// createVolume creates a volume.
-func (daemon *Daemon) createVolume(name, driverName string, opts map[string]string) (volume.Volume, error) {
-	v, err := daemon.volumes.Create(name, driverName, opts)
-	if err != nil {
-		return nil, err
-	}
-	daemon.volumes.Increment(v)
-	return v, nil
 }
 
 // Len returns the number of mounts. Used in sorting.
@@ -100,10 +89,11 @@ func (daemon *Daemon) registerMountPoints(container *container.Container, hostCo
 				Driver:      m.Driver,
 				Destination: m.Destination,
 				Propagation: m.Propagation,
+				Named:       m.Named,
 			}
 
 			if len(cp.Source) == 0 {
-				v, err := daemon.createVolume(cp.Name, cp.Driver, nil)
+				v, err := daemon.volumes.GetWithRef(cp.Name, cp.Driver, container.ID)
 				if err != nil {
 					return err
 				}
@@ -123,12 +113,12 @@ func (daemon *Daemon) registerMountPoints(container *container.Container, hostCo
 		}
 
 		if binds[bind.Destination] {
-			return derr.ErrorCodeMountDup.WithArgs(bind.Destination)
+			return fmt.Errorf("Duplicate mount point '%s'", bind.Destination)
 		}
 
-		if len(bind.Name) > 0 && len(bind.Driver) > 0 {
+		if len(bind.Name) > 0 {
 			// create the volume
-			v, err := daemon.createVolume(bind.Name, bind.Driver, nil)
+			v, err := daemon.volumes.CreateWithRef(bind.Name, bind.Driver, container.ID, nil)
 			if err != nil {
 				return err
 			}
@@ -136,7 +126,10 @@ func (daemon *Daemon) registerMountPoints(container *container.Container, hostCo
 			bind.Source = v.Path()
 			// bind.Name is an already existing volume, we need to use that here
 			bind.Driver = v.DriverName()
-			bind = setBindModeIfNull(bind)
+			bind.Named = true
+			if bind.Driver == "local" {
+				bind = setBindModeIfNull(bind)
+			}
 		}
 		if label.RelabelNeeded(bind.Mode) {
 			if err := label.Relabel(bind.Source, container.MountLabel, label.IsShared(bind.Mode)); err != nil {
@@ -153,7 +146,7 @@ func (daemon *Daemon) registerMountPoints(container *container.Container, hostCo
 	for _, m := range mountPoints {
 		if m.BackwardsCompatible() {
 			if mp, exists := container.MountPoints[m.Destination]; exists && mp.Volume != nil {
-				daemon.volumes.Decrement(mp.Volume)
+				daemon.volumes.Dereference(mp.Volume, container.ID)
 			}
 		}
 	}
@@ -161,5 +154,18 @@ func (daemon *Daemon) registerMountPoints(container *container.Container, hostCo
 
 	container.Unlock()
 
+	return nil
+}
+
+// lazyInitializeVolume initializes a mountpoint's volume if needed.
+// This happens after a daemon restart.
+func (daemon *Daemon) lazyInitializeVolume(containerID string, m *volume.MountPoint) error {
+	if len(m.Driver) > 0 && m.Volume == nil {
+		v, err := daemon.volumes.GetWithRef(m.Name, m.Driver, containerID)
+		if err != nil {
+			return err
+		}
+		m.Volume = v
+	}
 	return nil
 }

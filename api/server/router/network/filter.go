@@ -5,8 +5,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/runconfig"
+	"github.com/docker/engine-api/types/filters"
 	"github.com/docker/libnetwork"
 )
 
@@ -84,8 +84,8 @@ func filterNetworkByID(nws []libnetwork.Network, id string) (retNws []libnetwork
 	return retNws, nil
 }
 
-// filterAllNetworks filter network list according to user specified filter
-// and return user chosen networks
+// filterAllNetworks filters network list according to user specified filter
+// and returns user chosen networks
 func filterNetworks(nws []libnetwork.Network, filter filters.Args) ([]libnetwork.Network, error) {
 	// if filter is empty, return original network list
 	if filter.Len() == 0 {

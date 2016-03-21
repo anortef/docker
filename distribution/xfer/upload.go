@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/docker/distribution/digest"
+	"github.com/docker/distribution"
 	"github.com/docker/docker/layer"
 	"github.com/docker/docker/pkg/progress"
 	"golang.org/x/net/context"
@@ -29,9 +29,8 @@ func NewLayerUploadManager(concurrencyLimit int) *LayerUploadManager {
 type uploadTransfer struct {
 	Transfer
 
-	diffID layer.DiffID
-	digest digest.Digest
-	err    error
+	remoteDescriptor distribution.Descriptor
+	err              error
 }
 
 // An UploadDescriptor references a layer that may need to be uploaded.
@@ -43,17 +42,21 @@ type UploadDescriptor interface {
 	// DiffID should return the DiffID for this layer.
 	DiffID() layer.DiffID
 	// Upload is called to perform the Upload.
-	Upload(ctx context.Context, progressOutput progress.Output) (digest.Digest, error)
+	Upload(ctx context.Context, progressOutput progress.Output) (distribution.Descriptor, error)
+	// SetRemoteDescriptor provides the distribution.Descriptor that was
+	// returned by Upload. This descriptor is not to be confused with
+	// the UploadDescriptor interface, which is used for internally
+	// identifying layers that are being uploaded.
+	SetRemoteDescriptor(descriptor distribution.Descriptor)
 }
 
 // Upload is a blocking function which ensures the listed layers are present on
 // the remote registry. It uses the string returned by the Key method to
 // deduplicate uploads.
-func (lum *LayerUploadManager) Upload(ctx context.Context, layers []UploadDescriptor, progressOutput progress.Output) (map[layer.DiffID]digest.Digest, error) {
+func (lum *LayerUploadManager) Upload(ctx context.Context, layers []UploadDescriptor, progressOutput progress.Output) error {
 	var (
 		uploads          []*uploadTransfer
-		digests          = make(map[layer.DiffID]digest.Digest)
-		dedupDescriptors = make(map[string]struct{})
+		dedupDescriptors = make(map[string]*uploadTransfer)
 	)
 
 	for _, descriptor := range layers {
@@ -63,34 +66,35 @@ func (lum *LayerUploadManager) Upload(ctx context.Context, layers []UploadDescri
 		if _, present := dedupDescriptors[key]; present {
 			continue
 		}
-		dedupDescriptors[key] = struct{}{}
 
 		xferFunc := lum.makeUploadFunc(descriptor)
 		upload, watcher := lum.tm.Transfer(descriptor.Key(), xferFunc, progressOutput)
 		defer upload.Release(watcher)
 		uploads = append(uploads, upload.(*uploadTransfer))
+		dedupDescriptors[key] = upload.(*uploadTransfer)
 	}
 
 	for _, upload := range uploads {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 		case <-upload.Transfer.Done():
 			if upload.err != nil {
-				return nil, upload.err
+				return upload.err
 			}
-			digests[upload.diffID] = upload.digest
 		}
 	}
+	for _, l := range layers {
+		l.SetRemoteDescriptor(dedupDescriptors[l.Key()].remoteDescriptor)
+	}
 
-	return digests, nil
+	return nil
 }
 
 func (lum *LayerUploadManager) makeUploadFunc(descriptor UploadDescriptor) DoFunc {
 	return func(progressChan chan<- progress.Progress, start <-chan struct{}, inactive chan<- struct{}) Transfer {
 		u := &uploadTransfer{
 			Transfer: NewTransfer(),
-			diffID:   descriptor.DiffID(),
 		}
 
 		go func() {
@@ -109,9 +113,9 @@ func (lum *LayerUploadManager) makeUploadFunc(descriptor UploadDescriptor) DoFun
 
 			retries := 0
 			for {
-				digest, err := descriptor.Upload(u.Transfer.Context(), progressOutput)
+				remoteDescriptor, err := descriptor.Upload(u.Transfer.Context(), progressOutput)
 				if err == nil {
-					u.digest = digest
+					u.remoteDescriptor = remoteDescriptor
 					break
 				}
 
@@ -137,7 +141,7 @@ func (lum *LayerUploadManager) makeUploadFunc(descriptor UploadDescriptor) DoFun
 
 			selectLoop:
 				for {
-					progress.Updatef(progressOutput, descriptor.ID(), "Retrying in %d seconds", delay)
+					progress.Updatef(progressOutput, descriptor.ID(), "Retrying in %d second%s", delay, (map[bool]string{true: "s"})[delay != 1])
 					select {
 					case <-ticker.C:
 						delay--

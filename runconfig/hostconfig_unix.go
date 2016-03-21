@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/docker/docker/api/types/container"
+	"github.com/docker/engine-api/types/container"
 )
 
 // DefaultDaemonNetworkMode returns the default network stack the daemon should
@@ -19,7 +19,7 @@ func DefaultDaemonNetworkMode() container.NetworkMode {
 // IsPreDefinedNetwork indicates if a network is predefined by the daemon
 func IsPreDefinedNetwork(network string) bool {
 	n := container.NetworkMode(network)
-	return n.IsBridge() || n.IsHost() || n.IsNone()
+	return n.IsBridge() || n.IsHost() || n.IsNone() || n.IsDefault()
 }
 
 // ValidateNetMode ensures that the various combinations of requested
@@ -36,8 +36,12 @@ func ValidateNetMode(c *container.Config, hc *container.HostConfig) error {
 		}
 	}
 
-	if (hc.NetworkMode.IsHost() || hc.NetworkMode.IsContainer()) && c.Hostname != "" {
+	if hc.NetworkMode.IsContainer() && c.Hostname != "" {
 		return ErrConflictNetworkHostname
+	}
+
+	if hc.UTSMode.IsHost() && c.Hostname != "" {
+		return ErrConflictUTSHostname
 	}
 
 	if hc.NetworkMode.IsHost() && len(hc.Links) > 0 {
@@ -46,10 +50,6 @@ func ValidateNetMode(c *container.Config, hc *container.HostConfig) error {
 
 	if hc.NetworkMode.IsContainer() && len(hc.Links) > 0 {
 		return ErrConflictContainerNetworkAndLinks
-	}
-
-	if hc.NetworkMode.IsUserDefined() && len(hc.Links) > 0 {
-		return ErrConflictUserDefinedNetworkAndLinks
 	}
 
 	if (hc.NetworkMode.IsHost() || hc.NetworkMode.IsContainer()) && len(hc.DNS) > 0 {
@@ -74,10 +74,10 @@ func ValidateNetMode(c *container.Config, hc *container.HostConfig) error {
 	return nil
 }
 
-// ValidateIsolationLevel performs platform specific validation of the
-// isolation level in the hostconfig structure. Linux only supports "default"
+// ValidateIsolation performs platform specific validation of
+// isolation in the hostconfig structure. Linux only supports "default"
 // which is LXC container isolation
-func ValidateIsolationLevel(hc *container.HostConfig) error {
+func ValidateIsolation(hc *container.HostConfig) error {
 	// We may not be passed a host config, such as in the case of docker commit
 	if hc == nil {
 		return nil

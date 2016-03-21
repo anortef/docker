@@ -7,12 +7,14 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/docker/docker/api/types"
-	registrytypes "github.com/docker/docker/api/types/registry"
+	"golang.org/x/net/context"
+
 	Cli "github.com/docker/docker/cli"
 	flag "github.com/docker/docker/pkg/mflag"
 	"github.com/docker/docker/pkg/stringutils"
 	"github.com/docker/docker/registry"
+	"github.com/docker/engine-api/types"
+	registrytypes "github.com/docker/engine-api/types/registry"
 )
 
 // CmdSearch searches the Docker Hub for images.
@@ -36,7 +38,7 @@ func (cli *DockerCli) CmdSearch(args ...string) error {
 		return err
 	}
 
-	authConfig := registry.ResolveAuthConfig(cli.configFile.AuthConfigs, indexInfo)
+	authConfig := cli.resolveAuthConfig(indexInfo)
 	requestPrivilege := cli.registryAuthenticationPrivilegedFunc(indexInfo, "search")
 
 	encodedAuth, err := encodeAuthToBase64(authConfig)
@@ -49,7 +51,7 @@ func (cli *DockerCli) CmdSearch(args ...string) error {
 		RegistryAuth: encodedAuth,
 	}
 
-	unorderedResults, err := cli.client.ImageSearch(options, requestPrivilege)
+	unorderedResults, err := cli.client.ImageSearch(context.Background(), options, requestPrivilege)
 	if err != nil {
 		return err
 	}

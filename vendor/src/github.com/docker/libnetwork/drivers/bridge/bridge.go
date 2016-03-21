@@ -15,6 +15,7 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/libnetwork/datastore"
+	"github.com/docker/libnetwork/discoverapi"
 	"github.com/docker/libnetwork/driverapi"
 	"github.com/docker/libnetwork/iptables"
 	"github.com/docker/libnetwork/netlabel"
@@ -68,19 +69,24 @@ type networkConfiguration struct {
 	DefaultGatewayIPv6 net.IP
 	dbIndex            uint64
 	dbExists           bool
+	Internal           bool
 }
 
 // endpointConfiguration represents the user specified configuration for the sandbox endpoint
 type endpointConfiguration struct {
-	MacAddress   net.HardwareAddr
-	PortBindings []types.PortBinding
-	ExposedPorts []types.TransportPort
+	MacAddress net.HardwareAddr
 }
 
 // containerConfiguration represents the user specified configuration for a container
 type containerConfiguration struct {
 	ParentEndpoints []string
 	ChildEndpoints  []string
+}
+
+// cnnectivityConfiguration represents the user specified configuration regarding the external connectivity
+type connectivityConfiguration struct {
+	PortBindings []types.PortBinding
+	ExposedPorts []types.TransportPort
 }
 
 type bridgeEndpoint struct {
@@ -91,6 +97,7 @@ type bridgeEndpoint struct {
 	macAddress      net.HardwareAddr
 	config          *endpointConfiguration // User specified parameters
 	containerConfig *containerConfiguration
+	extConnConfig   *connectivityConfiguration
 	portMapping     []types.PortBinding // Operation port bindings
 }
 
@@ -106,12 +113,13 @@ type bridgeNetwork struct {
 }
 
 type driver struct {
-	config      *configuration
-	network     *bridgeNetwork
-	natChain    *iptables.ChainInfo
-	filterChain *iptables.ChainInfo
-	networks    map[string]*bridgeNetwork
-	store       datastore.DataStore
+	config         *configuration
+	network        *bridgeNetwork
+	natChain       *iptables.ChainInfo
+	filterChain    *iptables.ChainInfo
+	isolationChain *iptables.ChainInfo
+	networks       map[string]*bridgeNetwork
+	store          datastore.DataStore
 	sync.Mutex
 }
 
@@ -130,11 +138,11 @@ func Init(dc driverapi.DriverCallback, config map[string]interface{}) error {
 	if out, err := exec.Command("modprobe", "-va", "nf_nat").CombinedOutput(); err != nil {
 		logrus.Warnf("Running modprobe nf_nat failed with message: `%s`, error: %v", strings.TrimSpace(string(out)), err)
 	}
+	if out, err := exec.Command("modprobe", "-va", "xt_conntrack").CombinedOutput(); err != nil {
+		logrus.Warnf("Running modprobe xt_conntrack failed with message: `%s`, error: %v", strings.TrimSpace(string(out)), err)
+	}
 	if err := iptables.FirewalldInit(); err != nil {
 		logrus.Debugf("Fail to initialize firewalld: %v, using raw iptables instead", err)
-	}
-	if err := iptables.RemoveExistingChain(DockerChain, iptables.Nat); err != nil {
-		logrus.Warnf("Failed to remove existing iptables entries in %s : %v", DockerChain, err)
 	}
 
 	d := newDriver()
@@ -180,7 +188,7 @@ func (c *networkConfiguration) Conflicts(o *networkConfiguration) error {
 		return fmt.Errorf("same configuration")
 	}
 
-	// Also empty, becasue only one network with empty name is allowed
+	// Also empty, because only one network with empty name is allowed
 	if c.BridgeName == o.BridgeName {
 		return fmt.Errorf("networks have same bridge name")
 	}
@@ -244,15 +252,15 @@ func (n *bridgeNetwork) registerIptCleanFunc(clean iptableCleanFunc) {
 	n.iptCleanFuncs = append(n.iptCleanFuncs, clean)
 }
 
-func (n *bridgeNetwork) getDriverChains() (*iptables.ChainInfo, *iptables.ChainInfo, error) {
+func (n *bridgeNetwork) getDriverChains() (*iptables.ChainInfo, *iptables.ChainInfo, *iptables.ChainInfo, error) {
 	n.Lock()
 	defer n.Unlock()
 
 	if n.driver == nil {
-		return nil, nil, types.BadRequestErrorf("no driver found")
+		return nil, nil, nil, types.BadRequestErrorf("no driver found")
 	}
 
-	return n.driver.natChain, n.driver.filterChain, nil
+	return n.driver.natChain, n.driver.filterChain, n.driver.isolationChain, nil
 }
 
 func (n *bridgeNetwork) getNetworkBridgeName() string {
@@ -282,26 +290,25 @@ func (n *bridgeNetwork) getEndpoint(eid string) (*bridgeEndpoint, error) {
 // from each of the other networks
 func (n *bridgeNetwork) isolateNetwork(others []*bridgeNetwork, enable bool) error {
 	n.Lock()
-	thisV4 := n.bridge.bridgeIPv4
-	thisV6 := getV6Network(n.config, n.bridge)
+	thisConfig := n.config
 	n.Unlock()
+
+	if thisConfig.Internal {
+		return nil
+	}
 
 	// Install the rules to isolate this networks against each of the other networks
 	for _, o := range others {
 		o.Lock()
-		otherV4 := o.bridge.bridgeIPv4
-		otherV6 := getV6Network(o.config, o.bridge)
+		otherConfig := o.config
 		o.Unlock()
 
-		if !types.CompareIPNet(thisV4, otherV4) {
-			// It's ok to pass a.b.c.d/x, iptables will ignore the host subnet bits
-			if err := setINC(thisV4.String(), otherV4.String(), enable); err != nil {
-				return err
-			}
+		if otherConfig.Internal {
+			continue
 		}
 
-		if thisV6 != nil && otherV6 != nil && !types.CompareIPNet(thisV6, otherV6) {
-			if err := setINC(thisV6.String(), otherV6.String(), enable); err != nil {
+		if thisConfig.BridgeName != otherConfig.BridgeName {
+			if err := setINC(thisConfig.BridgeName, otherConfig.BridgeName, enable); err != nil {
 				return err
 			}
 		}
@@ -347,9 +354,11 @@ func (c *networkConfiguration) conflictsWithNetworks(id string, others []*bridge
 
 func (d *driver) configure(option map[string]interface{}) error {
 	var (
-		config                *configuration
-		err                   error
-		natChain, filterChain *iptables.ChainInfo
+		config         *configuration
+		err            error
+		natChain       *iptables.ChainInfo
+		filterChain    *iptables.ChainInfo
+		isolationChain *iptables.ChainInfo
 	)
 
 	genericData, ok := option[netlabel.GenericData]
@@ -378,15 +387,19 @@ func (d *driver) configure(option map[string]interface{}) error {
 	}
 
 	if config.EnableIPTables {
-		natChain, filterChain, err = setupIPChains(config)
+		removeIPChains()
+		natChain, filterChain, isolationChain, err = setupIPChains(config)
 		if err != nil {
 			return err
 		}
+		// Make sure on firewall reload, first thing being re-played is chains creation
+		iptables.OnReloaded(func() { logrus.Debugf("Recreating iptables chains on firewall reload"); setupIPChains(config) })
 	}
 
 	d.Lock()
 	d.natChain = natChain
 	d.filterChain = filterChain
+	d.isolationChain = isolationChain
 	d.config = config
 	d.Unlock()
 
@@ -442,7 +455,7 @@ func parseNetworkGenericOptions(data interface{}) (*networkConfiguration, error)
 
 func (c *networkConfiguration) processIPAM(id string, ipamV4Data, ipamV6Data []driverapi.IPAMData) error {
 	if len(ipamV4Data) > 1 || len(ipamV6Data) > 1 {
-		return types.ForbiddenErrorf("bridge driver doesnt support multiple subnets")
+		return types.ForbiddenErrorf("bridge driver doesn't support multiple subnets")
 	}
 
 	if len(ipamV4Data) == 0 {
@@ -492,7 +505,7 @@ func parseNetworkOptions(id string, option options.Generic) (*networkConfigurati
 
 	if val, ok := option[netlabel.Internal]; ok {
 		if internal, ok := val.(bool); ok && internal {
-			return nil, &driverapi.ErrNotImplemented{}
+			config.Internal = true
 		}
 	}
 
@@ -535,6 +548,9 @@ func (d *driver) getNetworks() []*bridgeNetwork {
 
 // Create a new network using bridge plugin
 func (d *driver) CreateNetwork(id string, option map[string]interface{}, ipV4Data, ipV6Data []driverapi.IPAMData) error {
+	if len(ipV4Data) == 0 || ipV4Data[0].Pool.String() == "0.0.0.0/0" {
+		return types.BadRequestErrorf("ipv4 pool is empty")
+	}
 	// Sanity checks
 	d.Lock()
 	if _, ok := d.networks[id]; ok {
@@ -573,7 +589,7 @@ func (d *driver) createNetwork(config *networkConfiguration) error {
 		nw.Unlock()
 		if err := nwConfig.Conflicts(config); err != nil {
 			return types.ForbiddenErrorf("cannot create network %s (%s): conflicts with network %s (%s): %s",
-				nwConfig.BridgeName, config.ID, nw.id, nw.config.BridgeName, err.Error())
+				config.ID, config.BridgeName, nwConfig.ID, nwConfig.BridgeName, err.Error())
 		}
 	}
 
@@ -940,27 +956,18 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 		}
 	}
 
-	// Create the sandbox side pipe interface
+	// Store the sandbox side pipe interface parameters
 	endpoint.srcName = containerIfName
 	endpoint.macAddress = ifInfo.MacAddress()
 	endpoint.addr = ifInfo.Address()
 	endpoint.addrv6 = ifInfo.AddressIPv6()
 
-	// Down the interface before configuring mac address.
-	if err = netlink.LinkSetDown(sbox); err != nil {
-		return fmt.Errorf("could not set link down for container interface %s: %v", containerIfName, err)
-	}
-
-	// Set the sbox's MAC. If specified, use the one configured by user, otherwise generate one based on IP.
+	// Set the sbox's MAC if not provided. If specified, use the one configured by user, otherwise generate one based on IP.
 	if endpoint.macAddress == nil {
 		endpoint.macAddress = electMacAddress(epConfig, endpoint.addr.IP)
-		if err := ifInfo.SetMacAddress(endpoint.macAddress); err != nil {
+		if err = ifInfo.SetMacAddress(endpoint.macAddress); err != nil {
 			return err
 		}
-	}
-	err = netlink.LinkSetHardwareAddr(sbox, endpoint.macAddress)
-	if err != nil {
-		return fmt.Errorf("could not set mac address for container interface %s: %v", containerIfName, err)
 	}
 
 	// Up the host interface after finishing all netlink configuration
@@ -988,15 +995,9 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 		}
 
 		endpoint.addrv6 = &net.IPNet{IP: ip6, Mask: network.Mask}
-		if err := ifInfo.SetIPAddress(endpoint.addrv6); err != nil {
+		if err = ifInfo.SetIPAddress(endpoint.addrv6); err != nil {
 			return err
 		}
-	}
-
-	// Program any required port mapping and store them in the endpoint
-	endpoint.portMapping, err = n.allocatePorts(epConfig, endpoint, config.DefaultBindingIP, d.config.EnableUserlandProxy)
-	if err != nil {
-		return err
 	}
 
 	return nil
@@ -1053,9 +1054,6 @@ func (d *driver) DeleteEndpoint(nid, eid string) error {
 		}
 	}()
 
-	// Remove port mappings. Do not stop endpoint delete on unmap failure
-	n.releasePorts(ep)
-
 	// Try removal of link. Discard error: it is a best effort.
 	// Also make sure defer does not see this error either.
 	if link, err := netlink.LinkByName(ep.srcName); err == nil {
@@ -1096,10 +1094,10 @@ func (d *driver) EndpointOperInfo(nid, eid string) (map[string]interface{}, erro
 
 	m := make(map[string]interface{})
 
-	if ep.config.ExposedPorts != nil {
+	if ep.extConnConfig != nil && ep.extConnConfig.ExposedPorts != nil {
 		// Return a copy of the config data
-		epc := make([]types.TransportPort, 0, len(ep.config.ExposedPorts))
-		for _, tp := range ep.config.ExposedPorts {
+		epc := make([]types.TransportPort, 0, len(ep.extConnConfig.ExposedPorts))
+		for _, tp := range ep.extConnConfig.ExposedPorts {
 			epc = append(epc, tp.GetCopy())
 		}
 		m[netlabel.ExposedPorts] = epc
@@ -1139,6 +1137,11 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 		return EndpointNotFoundError(eid)
 	}
 
+	endpoint.containerConfig, err = parseContainerOptions(options)
+	if err != nil {
+		return err
+	}
+
 	iNames := jinfo.InterfaceName()
 	err = iNames.SetNames(endpoint.srcName, containerVethPrefix)
 	if err != nil {
@@ -1153,10 +1156,6 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 	err = jinfo.SetGatewayIPv6(network.bridge.gatewayIPv6)
 	if err != nil {
 		return err
-	}
-
-	if !network.config.EnableICC {
-		return d.link(network, endpoint, options, true)
 	}
 
 	return nil
@@ -1181,32 +1180,87 @@ func (d *driver) Leave(nid, eid string) error {
 	}
 
 	if !network.config.EnableICC {
-		return d.link(network, endpoint, nil, false)
+		if err = d.link(network, endpoint, false); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func (d *driver) link(network *bridgeNetwork, endpoint *bridgeEndpoint, options map[string]interface{}, enable bool) error {
-	var (
-		cc  *containerConfiguration
-		err error
-	)
+func (d *driver) ProgramExternalConnectivity(nid, eid string, options map[string]interface{}) error {
+	defer osl.InitOSContext()()
 
-	if enable {
-		cc, err = parseContainerOptions(options)
-		if err != nil {
-			return err
-		}
-	} else {
-		cc = endpoint.containerConfig
+	network, err := d.getNetwork(nid)
+	if err != nil {
+		return err
 	}
 
+	endpoint, err := network.getEndpoint(eid)
+	if err != nil {
+		return err
+	}
+
+	if endpoint == nil {
+		return EndpointNotFoundError(eid)
+	}
+
+	endpoint.extConnConfig, err = parseConnectivityOptions(options)
+	if err != nil {
+		return err
+	}
+
+	// Program any required port mapping and store them in the endpoint
+	endpoint.portMapping, err = network.allocatePorts(endpoint, network.config.DefaultBindingIP, d.config.EnableUserlandProxy)
+	if err != nil {
+		return err
+	}
+
+	if !network.config.EnableICC {
+		return d.link(network, endpoint, true)
+	}
+
+	return nil
+}
+
+func (d *driver) RevokeExternalConnectivity(nid, eid string) error {
+	defer osl.InitOSContext()()
+
+	network, err := d.getNetwork(nid)
+	if err != nil {
+		return err
+	}
+
+	endpoint, err := network.getEndpoint(eid)
+	if err != nil {
+		return err
+	}
+
+	if endpoint == nil {
+		return EndpointNotFoundError(eid)
+	}
+
+	err = network.releasePorts(endpoint)
+	if err != nil {
+		logrus.Warn(err)
+	}
+
+	return nil
+}
+
+func (d *driver) link(network *bridgeNetwork, endpoint *bridgeEndpoint, enable bool) error {
+	var err error
+
+	cc := endpoint.containerConfig
 	if cc == nil {
 		return nil
 	}
+	ec := endpoint.extConnConfig
+	if ec == nil {
+		return nil
+	}
 
-	if endpoint.config != nil && endpoint.config.ExposedPorts != nil {
+	if ec.ExposedPorts != nil {
 		for _, p := range cc.ParentEndpoints {
 			var parentEndpoint *bridgeEndpoint
 			parentEndpoint, err = network.getEndpoint(p)
@@ -1220,7 +1274,7 @@ func (d *driver) link(network *bridgeNetwork, endpoint *bridgeEndpoint, options 
 
 			l := newLink(parentEndpoint.addr.IP.String(),
 				endpoint.addr.IP.String(),
-				endpoint.config.ExposedPorts, network.config.BridgeName)
+				ec.ExposedPorts, network.config.BridgeName)
 			if enable {
 				err = l.Enable()
 				if err != nil {
@@ -1247,13 +1301,13 @@ func (d *driver) link(network *bridgeNetwork, endpoint *bridgeEndpoint, options 
 			err = InvalidEndpointIDError(c)
 			return err
 		}
-		if childEndpoint.config == nil || childEndpoint.config.ExposedPorts == nil {
+		if childEndpoint.extConnConfig == nil || childEndpoint.extConnConfig.ExposedPorts == nil {
 			continue
 		}
 
 		l := newLink(endpoint.addr.IP.String(),
 			childEndpoint.addr.IP.String(),
-			childEndpoint.config.ExposedPorts, network.config.BridgeName)
+			childEndpoint.extConnConfig.ExposedPorts, network.config.BridgeName)
 		if enable {
 			err = l.Enable()
 			if err != nil {
@@ -1269,10 +1323,6 @@ func (d *driver) link(network *bridgeNetwork, endpoint *bridgeEndpoint, options 
 		}
 	}
 
-	if enable {
-		endpoint.containerConfig = cc
-	}
-
 	return nil
 }
 
@@ -1281,12 +1331,12 @@ func (d *driver) Type() string {
 }
 
 // DiscoverNew is a notification for a new discovery event, such as a new node joining a cluster
-func (d *driver) DiscoverNew(dType driverapi.DiscoveryType, data interface{}) error {
+func (d *driver) DiscoverNew(dType discoverapi.DiscoveryType, data interface{}) error {
 	return nil
 }
 
 // DiscoverDelete is a notification for a discovery delete event, such as a node leaving a cluster
-func (d *driver) DiscoverDelete(dType driverapi.DiscoveryType, data interface{}) error {
+func (d *driver) DiscoverDelete(dType discoverapi.DiscoveryType, data interface{}) error {
 	return nil
 }
 
@@ -1300,22 +1350,6 @@ func parseEndpointOptions(epOptions map[string]interface{}) (*endpointConfigurat
 	if opt, ok := epOptions[netlabel.MacAddress]; ok {
 		if mac, ok := opt.(net.HardwareAddr); ok {
 			ec.MacAddress = mac
-		} else {
-			return nil, &ErrInvalidEndpointConfig{}
-		}
-	}
-
-	if opt, ok := epOptions[netlabel.PortMap]; ok {
-		if bs, ok := opt.([]types.PortBinding); ok {
-			ec.PortBindings = bs
-		} else {
-			return nil, &ErrInvalidEndpointConfig{}
-		}
-	}
-
-	if opt, ok := epOptions[netlabel.ExposedPorts]; ok {
-		if ports, ok := opt.([]types.TransportPort); ok {
-			ec.ExposedPorts = ports
 		} else {
 			return nil, &ErrInvalidEndpointConfig{}
 		}
@@ -1344,6 +1378,32 @@ func parseContainerOptions(cOptions map[string]interface{}) (*containerConfigura
 	default:
 		return nil, nil
 	}
+}
+
+func parseConnectivityOptions(cOptions map[string]interface{}) (*connectivityConfiguration, error) {
+	if cOptions == nil {
+		return nil, nil
+	}
+
+	cc := &connectivityConfiguration{}
+
+	if opt, ok := cOptions[netlabel.PortMap]; ok {
+		if pb, ok := opt.([]types.PortBinding); ok {
+			cc.PortBindings = pb
+		} else {
+			return nil, types.BadRequestErrorf("Invalid port mapping data in connectivity configuration: %v", opt)
+		}
+	}
+
+	if opt, ok := cOptions[netlabel.ExposedPorts]; ok {
+		if ports, ok := opt.([]types.TransportPort); ok {
+			cc.ExposedPorts = ports
+		} else {
+			return nil, types.BadRequestErrorf("Invalid exposed ports data in connectivity configuration: %v", opt)
+		}
+	}
+
+	return cc, nil
 }
 
 func electMacAddress(epConfig *endpointConfiguration, ip net.IP) net.HardwareAddr {

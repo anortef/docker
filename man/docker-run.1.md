@@ -37,6 +37,8 @@ docker-run - Run a command in a new container
 [**-h**|**--hostname**[=*HOSTNAME*]]
 [**--help**]
 [**-i**|**--interactive**]
+[**--ip**[=*IPv4-ADDRESS*]]
+[**--ip6**[=*IPv6-ADDRESS*]]
 [**--ipc**[=*IPC*]]
 [**--isolation**[=*default*]]
 [**--kernel-memory**[=*KERNEL-MEMORY*]]
@@ -52,11 +54,14 @@ docker-run - Run a command in a new container
 [**--memory-swappiness**[=*MEMORY-SWAPPINESS*]]
 [**--name**[=*NAME*]]
 [**--net**[=*"bridge"*]]
+[**--net-alias**[=*[]*]]
 [**--oom-kill-disable**]
 [**--oom-score-adj**[=*0*]]
 [**-P**|**--publish-all**]
 [**-p**|**--publish**[=*[]*]]
 [**--pid**[=*[]*]]
+[**--userns**[=*[]*]]
+[**--pids-limit**[=*PIDS_LIMIT*]]
 [**--privileged**]
 [**--read-only**]
 [**--restart**[=*RESTART*]]
@@ -274,6 +279,16 @@ redirection on the host system.
 
    When set to true, keep stdin open even if not attached. The default is false.
 
+**--ip**=""
+   Sets the container's interface IPv4 address (e.g. 172.23.0.9)
+
+   It can only be used in conjunction with **--net** for user-defined networks
+
+**--ip6**=""
+   Sets the container's interface IPv6 address (e.g. 2001:db8::1b99)
+
+   It can only be used in conjunction with **--net** for user-defined networks
+
 **--ipc**=""
    Default is to create a private IPC namespace (POSIX SysV IPC) for the container
                                'container:<name|id>': reuses another container shared memory, semaphores and message queues
@@ -307,7 +322,7 @@ container can access the exposed port via a private networking interface. Docker
 will set some environment variables in the client container to help indicate
 which interface and port to use.
 
-**--log-driver**="*json-file*|*syslog*|*journald*|*gelf*|*fluentd*|*awslogs*|*splunk*|*none*"
+**--log-driver**="*json-file*|*syslog*|*journald*|*gelf*|*fluentd*|*awslogs*|*splunk*|*etwlogs*|*gcplogs*|*none*"
   Logging driver for container. Default is defined by daemon `--log-driver` flag.
   **Warning**: the `docker logs` command works only for the `json-file` and
   `journald` logging drivers.
@@ -371,6 +386,9 @@ and foreground Docker containers.
                                'host': use the Docker host network stack. Note: the host mode gives the container full access to local system services such as D-bus and is therefore considered insecure.
                                '<network-name>|<network-id>': connect to a user-defined network
 
+**--net-alias**=[]
+   Add network-scoped alias for the container
+
 **--oom-kill-disable**=*true*|*false*
    Whether to disable OOM Killer for the container or not.
 
@@ -403,6 +421,13 @@ Use `docker port` to see the actual mapping: `docker port CONTAINER $CONTAINERPO
    Set the PID mode for the container
      **host**: use the host's PID namespace inside the container.
      Note: the host mode gives the container full access to local PID and is therefore considered insecure.
+
+**--userns**=""
+   Set the usernamespace mode for the container when `userns-remap` option is enabled.
+     **host**: use the host usernamespace and enable all privileged options (e.g., `pid=host` or `--privileged`).
+
+**--pids-limit**=""
+   Tune the container's pids limit. Set `-1` to have unlimited pids for the container.
 
 **--uts**=*host*
    Set the UTS mode for the container
@@ -438,11 +463,18 @@ its root filesystem mounted as read only prohibiting any writes.
 **--security-opt**=[]
    Security Options
 
-   "label:user:USER"   : Set the label user for the container
-    "label:role:ROLE"   : Set the label role for the container
-    "label:type:TYPE"   : Set the label type for the container
-    "label:level:LEVEL" : Set the label level for the container
-    "label:disable"     : Turn off label confinement for the container
+    "label=user:USER"   : Set the label user for the container
+    "label=role:ROLE"   : Set the label role for the container
+    "label=type:TYPE"   : Set the label type for the container
+    "label=level:LEVEL" : Set the label level for the container
+    "label=disable"     : Turn off label confinement for the container
+    "no-new-privileges" : Disable container processes from gaining additional privileges
+
+    "seccomp=unconfined" : Turn off seccomp confinement for the container
+    "seccomp=profile.json :  White listed syscalls seccomp Json file to be used as a seccomp filter
+
+    "apparmor=unconfined" : Turn off apparmor confinement for the container
+    "apparmor=your-profile" : Set the apparmor confinement profile for the container
 
 **--stop-signal**=*SIGTERM*
   Signal to stop a container. Default is SIGTERM.
@@ -474,10 +506,7 @@ standard input.
 
    $ docker run -d --tmpfs /tmp:rw,size=787448k,mode=1777 my_image
 
-   This command mounts a `tmpfs` at `/tmp` within the container. The mount copies
-the underlying content of `my_image` into `/tmp`. For example if there was a
-directory `/tmp/content` in the base image, docker will copy this directory and
-all of its content on top of the tmpfs mounted on `/tmp`.  The supported mount
+   This command mounts a `tmpfs` at `/tmp` within the container.  The supported mount
 options are the same as the Linux default `mount` flags. If you do not specify
 any options, the systems uses the following options:
 `rw,noexec,nosuid,nodev,size=65536k`.
@@ -565,6 +594,14 @@ example, if one wants to bind mount source directory `/foo` one can do
 will convert /foo into a `shared` mount point. Alternatively one can directly
 change propagation properties of source mount. Say `/` is source mount for
 `/foo`, then use `mount --make-shared /` to convert `/` into a `shared` mount.
+
+> **Note**:
+> When using systemd to manage the Docker daemon's start and stop, in the systemd
+> unit file there is an option to control mount propagation for the Docker daemon
+> itself, called `MountFlags`. The value of this setting may cause Docker to not
+> see mount propagation changes made on the mount point. For example, if this value
+> is `slave`, you may not be able to use the `shared` or `rshared` propagation on
+> a volume.
 
 **--volume-driver**=""
    Container's volume driver. This driver creates volumes specified either from
@@ -738,6 +775,12 @@ Create a 3rd container using the new --ipc=container:CONTAINERID option, now it 
 
 ## Linking Containers
 
+> **Note**: This section describes linking between containers on the
+> default (bridge) network, also known as "legacy links". Using `--link`
+> on user-defined networks uses the DNS-based discovery, which does not add
+> entries to `/etc/hosts`, and does not set environment variables for
+> discovery.
+
 The link feature allows multiple containers to communicate with each other. For
 example, a container whose Dockerfile has exposed port 80 can be run and named
 as follows:
@@ -839,23 +882,23 @@ the `--security-opt` flag. For example, you can specify the MCS/MLS level, a
 requirement for MLS systems. Specifying the level in the following command
 allows you to share the same content between containers.
 
-    # docker run --security-opt label:level:s0:c100,c200 -i -t fedora bash
+    # docker run --security-opt label=level:s0:c100,c200 -i -t fedora bash
 
 An MLS example might be:
 
-    # docker run --security-opt label:level:TopSecret -i -t rhel7 bash
+    # docker run --security-opt label=level:TopSecret -i -t rhel7 bash
 
 To disable the security labeling for this container versus running with the
 `--permissive` flag, use the following command:
 
-    # docker run --security-opt label:disable -i -t fedora bash
+    # docker run --security-opt label=disable -i -t fedora bash
 
 If you want a tighter security policy on the processes within a container,
 you can specify an alternate type for the container. You could run a container
 that is only allowed to listen on Apache ports by executing the following
 command:
 
-    # docker run --security-opt label:type:svirt_apache_t -i -t centos bash
+    # docker run --security-opt label=type:svirt_apache_t -i -t centos bash
 
 Note:
 

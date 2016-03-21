@@ -17,15 +17,17 @@ weight = -1
 
     Options:
       --api-cors-header=""                   Set CORS headers in the remote API
-      --authz-plugin=[]                     Set authorization plugins to load
+      --authorization-plugin=[]              Set authorization plugins to load
       -b, --bridge=""                        Attach containers to a network bridge
       --bip=""                               Specify network bridge IP
+      --cgroup-parent=                       Set parent cgroup for all containers
       -D, --debug                            Enable debug mode
       --default-gateway=""                   Container default gateway IPv4 address
       --default-gateway-v6=""                Container default gateway IPv6 address
       --cluster-store=""                     URL of the distributed storage backend
       --cluster-advertise=""                 Address of the daemon instance on the cluster
       --cluster-store-opt=map[]              Set cluster options
+      --config-file=/etc/docker/daemon.json  Daemon configuration file
       --dns=[]                               DNS server to use
       --dns-opt=[]                           DNS options to use
       --dns-search=[]                        DNS search domains to use
@@ -52,6 +54,7 @@ weight = -1
       --mtu=0                                Set the containers network MTU
       --disable-legacy-registry              Do not contact legacy registries
       -p, --pidfile="/var/run/docker.pid"    Path to use for daemon PID file
+      --raw-logs                             Full timestamps without ANSI coloring
       --registry-mirror=[]                   Preferred Docker registry mirror
       -s, --storage-driver=""                Storage driver to use
       --selinux-enabled                      Enable selinux support
@@ -61,6 +64,7 @@ weight = -1
       --tlscert="~/.docker/cert.pem"         Path to TLS certificate file
       --tlskey="~/.docker/key.pem"           Path to TLS key file
       --tlsverify                            Use TLS and verify the remote
+      --userns-remap="default"               Enable user namespace remapping
       --userland-proxy=true                  Use userland proxy for loopback traffic
 
 Options with [] may be specified multiple times.
@@ -83,7 +87,7 @@ membership.
 If you need to access the Docker daemon remotely, you need to enable the `tcp`
 Socket. Beware that the default setup provides un-encrypted and
 un-authenticated direct access to the Docker daemon - and should be secured
-either using the [built in HTTPS encrypted socket](../../articles/https/), or by
+either using the [built in HTTPS encrypted socket](../../security/https/), or by
 putting a secure web proxy in front of it. You can listen on port `2375` on all
 network interfaces with `-H tcp://0.0.0.0:2375`, or on a particular network
 interface using its IP address: `-H tcp://192.168.59.103:2375`. It is
@@ -211,10 +215,22 @@ options for `zfs` start with `zfs`.
 *  `dm.basesize`
 
     Specifies the size to use when creating the base device, which limits the
-    size of images and containers. The default value is 100G. Note, thin devices
-    are inherently "sparse", so a 100G device which is mostly empty doesn't use
-    100 GB of space on the pool. However, the filesystem will use more space for
+    size of images and containers. The default value is 10G. Note, thin devices
+    are inherently "sparse", so a 10G device which is mostly empty doesn't use
+    10 GB of space on the pool. However, the filesystem will use more space for
     the empty case the larger the device is.
+
+    The base device size can be increased at daemon restart which will allow
+    all future images and containers (based on those new images) to be of the
+    new base device size.
+
+    Example use:
+
+        $ docker daemon --storage-opt dm.basesize=50G
+
+    This will increase the base device size to 50G. The Docker daemon will throw an
+    error if existing base device size is larger than 50G. A user can use
+    this option to expand the base device size however shrinking is not permitted.
 
     This value affects the system-wide "base" empty filesystem
     that may already be initialized and inherited by pulled images. Typically,
@@ -422,6 +438,32 @@ options for `zfs` start with `zfs`.
     when unintentional leaking of mount point happens across multiple mount
     namespaces.
 
+*  `dm.min_free_space`
+
+    Specifies the min free space percent in thin pool require for new device
+    creation to succeed. This check applies to both free data space as well
+    as free metadata space. Valid values are from 0% - 99%. Value 0% disables
+    free space checking logic. If user does not specify a value for this optoin,
+    then default value for this option is 10%.
+
+    Whenever a new thin pool device is created (during docker pull or
+    during container creation), docker will check minimum free space is
+    available as specified by this parameter. If that is not the case, then
+    device creation will fail and docker operation will fail.
+
+    One will have to create more free space in thin pool to recover from the
+    error. Either delete some of the images and containers from thin pool and
+    create free space or add more storage to thin pool.
+
+    For lvm thin pool, one can add more storage to volume group container thin
+    pool and that should automatically resolve it. If loop devices are being
+    used, then stop docker, grow the size of loop files and restart docker and
+    that should resolve the issue.
+
+    Example use:
+
+        $ docker daemon --storage-opt dm.min_free_space_percent=10%
+
 Currently supported options of `zfs`:
 
 * `zfs.fsname`
@@ -550,7 +592,7 @@ please check the [run](run.md) reference.
 
 ## Nodes discovery
 
-The `--cluster-advertise` option specifies the 'host:port' or `interface:port`
+The `--cluster-advertise` option specifies the `host:port` or `interface:port`
 combination that this particular daemon instance should use when advertising
 itself to the cluster. The daemon is reached by remote hosts through this value.
 If you  specify an interface, make sure it includes the IP address of the actual
@@ -602,15 +644,19 @@ The currently supported cluster store options are:
     private key is used as the client key for communication with the
     Key/Value store.
 
+*  `kv.path`
+
+    Specifies the path in the Key/Value store. If not configured, the default value is 'docker/nodes'.
+
 ## Access authorization
 
 Docker's access authorization can be extended by authorization plugins that your
 organization can purchase or build themselves. You can install one or more
 authorization plugins when you start the Docker `daemon` using the
-`--authz-plugin=PLUGIN_ID` option.
+`--authorization-plugin=PLUGIN_ID` option.
 
 ```bash
-docker daemon --authz-plugin=plugin1 --authz-plugin=plugin2,...
+docker daemon --authorization-plugin=plugin1 --authorization-plugin=plugin2,...
 ```
 
 The `PLUGIN_ID` value is either the plugin's name or a path to its specification
@@ -624,8 +670,146 @@ multiple plugins installed, at least one must allow the request for it to
 complete.
 
 For information about how to create an authorization plugin, see [authorization
-plugin](../../extend/authorization.md) section in the Docker extend section of this documentation.
+plugin](../../extend/plugins_authorization.md) section in the Docker extend section of this documentation.
 
+
+## Daemon user namespace options
+
+The Linux kernel [user namespace support](http://man7.org/linux/man-pages/man7/user_namespaces.7.html) provides additional security by enabling
+a process, and therefore a container, to have a unique range of user and
+group IDs which are outside the traditional user and group range utilized by
+the host system. Potentially the most important security improvement is that,
+by default, container processes running as the `root` user will have expected
+administrative privilege (with some restrictions) inside the container but will
+effectively be mapped to an unprivileged `uid` on the host.
+
+When user namespace support is enabled, Docker creates a single daemon-wide mapping
+for all containers running on the same engine instance. The mappings will
+utilize the existing subordinate user and group ID feature available on all modern
+Linux distributions.
+The [`/etc/subuid`](http://man7.org/linux/man-pages/man5/subuid.5.html) and
+[`/etc/subgid`](http://man7.org/linux/man-pages/man5/subgid.5.html) files will be
+read for the user, and optional group, specified to the `--userns-remap`
+parameter.  If you do not wish to specify your own user and/or group, you can
+provide `default` as the value to this flag, and a user will be created on your behalf
+and provided subordinate uid and gid ranges. This default user will be named
+`dockremap`, and entries will be created for it in `/etc/passwd` and
+`/etc/group` using your distro's standard user and group creation tools.
+
+> **Note**: The single mapping per-daemon restriction is in place for now
+> because Docker shares image layers from its local cache across all
+> containers running on the engine instance.  Since file ownership must be
+> the same for all containers sharing the same layer content, the decision
+> was made to map the file ownership on `docker pull` to the daemon's user and
+> group mappings so that there is no delay for running containers once the
+> content is downloaded. This design preserves the same performance for `docker
+> pull`, `docker push`, and container startup as users expect with
+> user namespaces disabled.
+
+### Starting the daemon with user namespaces enabled
+
+To enable user namespace support, start the daemon with the
+`--userns-remap` flag, which accepts values in the following formats:
+
+ - uid
+ - uid:gid
+ - username
+ - username:groupname
+
+If numeric IDs are provided, translation back to valid user or group names
+will occur so that the subordinate uid and gid information can be read, given
+these resources are name-based, not id-based.  If the numeric ID information
+provided does not exist as entries in `/etc/passwd` or `/etc/group`, daemon
+startup will fail with an error message.
+
+> **Note:** On Fedora 22, you have to `touch` the `/etc/subuid` and `/etc/subgid`
+> files to have ranges assigned when users are created.  This must be done
+> *before* the `--userns-remap` option is enabled. Once these files exist, the
+> daemon can be (re)started and range assignment on user creation works properly.
+
+*Example: starting with default Docker user management:*
+
+```bash
+$ docker daemon --userns-remap=default
+```
+
+When `default` is provided, Docker will create - or find the existing - user and group
+named `dockremap`. If the user is created, and the Linux distribution has
+appropriate support, the `/etc/subuid` and `/etc/subgid` files will be populated
+with a contiguous 65536 length range of subordinate user and group IDs, starting
+at an offset based on prior entries in those files.  For example, Ubuntu will
+create the following range, based on an existing user named `user1` already owning
+the first 65536 range:
+
+```bash
+$ cat /etc/subuid
+user1:100000:65536
+dockremap:165536:65536
+```
+
+If you have a preferred/self-managed user with subordinate ID mappings already
+configured, you can provide that username or uid to the `--userns-remap` flag.
+If you have a group that doesn't match the username, you may provide the `gid`
+or group name as well; otherwise the username will be used as the group name
+when querying the system for the subordinate group ID range.
+
+### Detailed information on `subuid`/`subgid` ranges
+
+Given potential advanced use of the subordinate ID ranges by power users, the
+following paragraphs define how the Docker daemon currently uses the range entries
+found within the subordinate range files.
+
+The simplest case is that only one contiguous range is defined for the
+provided user or group. In this case, Docker will use that entire contiguous
+range for the mapping of host uids and gids to the container process.  This
+means that the first ID in the range will be the remapped root user, and the
+IDs above that initial ID will map host ID 1 through the end of the range.
+
+From the example `/etc/subuid` content shown above, the remapped root
+user would be uid 165536.
+
+If the system administrator has set up multiple ranges for a single user or
+group, the Docker daemon will read all the available ranges and use the
+following algorithm to create the mapping ranges:
+
+1. The range segments found for the particular user will be sorted by *start ID* ascending.
+2. Map segments will be created from each range in increasing value with a length matching the length of each segment. Therefore the range segment with the lowest numeric starting value will be equal to the remapped root, and continue up through host uid/gid equal to the range segment length. As an example, if the lowest segment starts at ID 1000 and has a length of 100, then a map of 1000 -> 0 (the remapped root) up through 1100 -> 100 will be created from this segment. If the next segment starts at ID 10000, then the next map will start with mapping 10000 -> 101 up to the length of this second segment. This will continue until no more segments are found in the subordinate files for this user.
+3. If more than five range segments exist for a single user, only the first five will be utilized, matching the kernel's limitation of only five entries in `/proc/self/uid_map` and `proc/self/gid_map`.
+
+### Disable user namespace for a container
+
+If you enable user namespaces on the daemon, all containers are started
+with user namespaces enabled. In some situations you might want to disable
+this feature for a container, for example, to start a privileged container (see
+[user namespace known restrictions](#user-namespace-known-restrictions)).
+To enable those advanced features for a specific container use `--userns=host`
+in the `run/exec/create` command.
+This option will completely disable user namespace mapping for the container's user.
+
+### User namespace known restrictions
+
+The following standard Docker features are currently incompatible when
+running a Docker daemon with user namespaces enabled:
+
+ - sharing PID or NET namespaces with the host (`--pid=host` or `--net=host`)
+ - sharing a network namespace with an existing container (`--net=container:*other*`)
+ - sharing an IPC namespace with an existing container (`--ipc=container:*other*`)
+ - A `--readonly` container filesystem (this is a Linux kernel restriction against remounting with modified flags of a currently mounted filesystem when inside a user namespace)
+ - external (volume or graph) drivers which are unaware/incapable of using daemon user mappings
+ - Using `--privileged` mode flag on `docker run`
+
+In general, user namespaces are an advanced feature and will require
+coordination with other capabilities. For example, if volumes are mounted from
+the host, file ownership will have to be pre-arranged if the user or
+administrator wishes the containers to have expected access to the volume
+contents.
+
+Finally, while the `root` user inside a user namespaced container process has
+many of the expected admin privileges that go along with being the superuser, the
+Linux kernel has restrictions based on internal knowledge that this is a user namespaced
+process. The most notable restriction that we are aware of at this time is the
+inability to use `mknod`. Permission will be denied for device creation even as
+container `root` inside a user namespace.
 
 ## Miscellaneous options
 
@@ -643,4 +827,126 @@ set like this:
     /usr/local/bin/docker daemon -D -g /var/lib/docker -H unix:// > /var/lib/docker-machine/docker.log 2>&1
 
 
+## Default cgroup parent
 
+The `--cgroup-parent` option allows you to set the default cgroup parent
+to use for containers. If this option is not set, it defaults to `/docker` for
+fs cgroup driver and `system.slice` for systemd cgroup driver.
+
+If the cgroup has a leading forward slash (`/`), the cgroup is created
+under the root cgroup, otherwise the cgroup is created under the daemon
+cgroup.
+
+Assuming the daemon is running in cgroup `daemoncgroup`,
+`--cgroup-parent=/foobar` creates a cgroup in
+`/sys/fs/cgroup/memory/foobar`, whereas using `--cgroup-parent=foobar`
+creates the cgroup in `/sys/fs/cgroup/memory/daemoncgroup/foobar`
+
+The systemd cgroup driver has different rules for `--cgroup-parent`. Systemd
+represents hierarchy by slice and the name of the slice encodes the location in
+the tree. So `--cgroup-parent` for systemd cgroups should be a slice name. A
+name can consist of a dash-separated series of names, which describes the path
+to the slice from the root slice. For example, `--cgroup-parent=user-a-b.slice`
+means the memory cgroup for the container is created in
+`/sys/fs/cgroup/memory/user.slice/user-a.slice/user-a-b.slice/docker-<id>.scope`.
+
+This setting can also be set per container, using the `--cgroup-parent`
+option on `docker create` and `docker run`, and takes precedence over
+the `--cgroup-parent` option on the daemon.
+
+## Daemon configuration file
+
+The `--config-file` option allows you to set any configuration option
+for the daemon in a JSON format. This file uses the same flag names as keys,
+except for flags that allow several entries, where it uses the plural
+of the flag name, e.g., `labels` for the `label` flag. By default,
+docker tries to load a configuration file from `/etc/docker/daemon.json`
+on Linux and `%programdata%\docker\config\daemon.json` on Windows.
+
+The options set in the configuration file must not conflict with options set
+via flags. The docker daemon fails to start if an option is duplicated between
+the file and the flags, regardless their value. We do this to avoid
+silently ignore changes introduced in configuration reloads.
+For example, the daemon fails to start if you set daemon labels
+in the configuration file and also set daemon labels via the `--label` flag.
+
+Options that are not present in the file are ignored when the daemon starts.
+This is a full example of the allowed configuration options in the file:
+
+```json
+{
+	"authorization-plugins": [],
+	"dns": [],
+	"dns-opts": [],
+	"dns-search": [],
+	"exec-opts": [],
+	"exec-root": "",
+	"storage-driver": "",
+	"storage-opts": "",
+	"labels": [],
+	"log-driver": "",
+	"log-opts": [],
+	"mtu": 0,
+	"pidfile": "",
+	"graph": "",
+	"cluster-store": "",
+	"cluster-store-opts": [],
+	"cluster-advertise": "",
+	"debug": true,
+	"hosts": [],
+	"log-level": "",
+	"tls": true,
+	"tlsverify": true,
+	"tlscacert": "",
+	"tlscert": "",
+	"tlskey": "",
+	"api-cors-headers": "",
+	"selinux-enabled": false,
+	"userns-remap": "",
+	"group": "",
+	"cgroup-parent": "",
+	"default-ulimits": {},
+	"ipv6": false,
+	"iptables": false,
+	"ip-forward": false,
+	"ip-mask": false,
+	"userland-proxy": false,
+	"ip": "0.0.0.0",
+	"bridge": "",
+	"bip": "",
+	"fixed-cidr": "",
+	"fixed-cidr-v6": "",
+	"default-gateway": "",
+	"default-gateway-v6": "",
+	"icc": false,
+	"raw-logs": false,
+	"registry-mirrors": [],
+	"insecure-registries": [],
+	"disable-legacy-registry": false
+}
+```
+
+### Configuration reloading
+
+Some options can be reconfigured when the daemon is running without requiring
+to restart the process. We use the `SIGHUP` signal in Linux to reload, and a global event
+in Windows with the key `Global\docker-daemon-config-$PID`. The options can
+be modified in the configuration file but still will check for conflicts with
+the provided flags. The daemon fails to reconfigure itself
+if there are conflicts, but it won't stop execution.
+
+The list of currently supported options that can be reconfigured is this:
+
+- `debug`: it changes the daemon to debug mode when set to true.
+- `cluster-store`: it reloads the discovery store with the new address.
+- `cluster-store-opts`: it uses the new options to reload the discovery store.
+- `cluster-advertise`: it modifies the address advertised after reloading.
+- `labels`: it replaces the daemon labels with a new set of labels.
+
+Updating and reloading the cluster configurations such as `--cluster-store`,
+`--cluster-advertise` and `--cluster-store-opts` will take effect only if
+these configurations were not previously configured. If `--cluster-store`
+has been provided in flags and `cluster-advertise` not, `cluster-advertise`
+can be added in the configuration file without accompanied by `--cluster-store`
+Configuration reload will log a warning message if it detects a change in
+previously configured cluster configurations.
